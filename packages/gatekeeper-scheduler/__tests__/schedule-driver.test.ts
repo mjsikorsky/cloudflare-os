@@ -412,6 +412,7 @@ describe("ScheduleDriver", () => {
     expect(messages.read).toContain("Unsupported scheduler schedule row");
     expect(messages.mutation).toContain("Unsupported scheduler schedule row");
     expect(reportIssue).toHaveBeenCalledWith(
+      expect.any(Object),
       "scheduler.schedule-row.unsupported",
       expect.any(Error),
       expect.objectContaining({ handled: true }),
@@ -446,6 +447,7 @@ describe("ScheduleDriver", () => {
     const alarm = await runInDurableObject(driver, (_instance, state) => state.storage.getAlarm());
     expect(alarm).toBeGreaterThan(Date.now());
     expect(reportIssue).toHaveBeenCalledWith(
+      expect.any(Object),
       "scheduler.schedule-row.unsupported",
       expect.any(Error),
       expect.objectContaining({ handled: true }),
@@ -857,6 +859,7 @@ describe("ScheduleDriver", () => {
       ),
     ).toHaveLength(1);
     expect(reportIssue).toHaveBeenCalledWith(
+      expect.any(Object),
       "scheduler.delivery",
       expect.anything(),
       expect.objectContaining({
@@ -894,6 +897,7 @@ describe("ScheduleDriver", () => {
     await runDurableObjectAlarm(driver);
 
     expect(reportIssue).toHaveBeenCalledWith(
+      expect.any(Object),
       "scheduler.capabilities.missing",
       expect.any(Error),
       expect.objectContaining({
@@ -925,6 +929,7 @@ describe("ScheduleDriver", () => {
 
     expect(failure).toContain("Unsupported scheduler driver metadata");
     expect(reportIssue).toHaveBeenCalledWith(
+      expect.any(Object),
       "scheduler.alarm",
       expect.any(Error),
       expect.objectContaining({
@@ -1039,6 +1044,7 @@ describe("ScheduleDriver", () => {
 
     expect(result).toBe(true);
     expect(reportIssue).toHaveBeenCalledWith(
+      expect.any(Object),
       "scheduler.alarm.plan",
       expect.any(Error),
       expect.objectContaining({

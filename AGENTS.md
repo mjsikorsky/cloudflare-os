@@ -92,10 +92,10 @@ IMPORTANT: Server-side logging uses `@gadgets/backend-utils/logger` (frontend br
   `info` is notable lifecycle, and `debug` is noisy breadcrumbs. Never log secrets, prompts, headers,
   tokens, or request/response bodies.
 - To also dispatch a failure to the optional external issue Reporter (in addition to logging it),
-  call `reportIssue(failureSite, caught, options?)` from
+  call `reportIssue(env, failureSite, caught, options?)` from
   `@gadgets/backend-utils/error-reporting`. Attach ambient fields from the package's observability
   context and augment them with capture-site fields:
-  `reportIssue("overseer.catalog-fallback", err, { handled: true, attributes: { ...obsContext.get(), gatekeeperId } });`.
+  `reportIssue(this.env, "overseer.catalog-fallback", err, { handled: true, attributes: { ...obsContext.get(), gatekeeperId } });`.
   It is a no-op when the `ERROR_REPORTER` binding is absent (local dev / deployments without an issue
   destination). Only bounded scalars are retained as attributes; reported context obeys the same
   no-secrets rules as log fields.

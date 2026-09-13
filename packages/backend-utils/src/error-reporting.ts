@@ -1,4 +1,4 @@
-import { env, waitUntil, type WorkerEntrypoint } from "cloudflare:workers";
+import { waitUntil, type WorkerEntrypoint } from "cloudflare:workers";
 import { createLogger } from "./logger.js";
 import {
   MAX_ATTRIBUTE_KEYS,
@@ -71,9 +71,9 @@ function createErrorEvent(
  * the caller. A no-op when the optional `ERROR_REPORTER` binding is absent (local dev and
  * deployments without an Issue destination).
  *
- * Unlike recordAnalytics() (which threads ctx/env through every call site), this reads the
- * ambient `env` and `waitUntil` from `cloudflare:workers` so a single line reports from any
- * Worker, DO method, or alarm without plumbing arguments to each capture site.
+ * The caller supplies its reporting environment explicitly. This preserves the same capability
+ * in Worker handlers, RPC methods and alarms, including deployments that adapt binding names.
+ * The helper never falls back to an ambient environment when the capability is absent.
  *
  * Lifetime: `report()` is dispatched eagerly, so the outbound RPC is in flight before
  * `waitUntil` is consulted. In a stateless Worker `waitUntil` extends the event past the
@@ -85,6 +85,7 @@ function createErrorEvent(
  * augment it inline when the capture site has additional fields.
  */
 export function reportIssue(
+    env: Pick<Cloudflare.Env, "ERROR_REPORTER">,
     failureSite: string,
     caught: unknown,
     options?: ErrorReportOptions): void {

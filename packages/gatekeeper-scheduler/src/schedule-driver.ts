@@ -228,7 +228,7 @@ export class ScheduleDriver extends DurableObject {
           event: "scheduler.account.revoke.failed",
           error,
         });
-        reportIssue("scheduler.revoke", error, { attributes: obsContext.get() });
+        reportIssue(this.env, "scheduler.revoke", error, { attributes: obsContext.get() });
         throw error;
       }
     });
@@ -255,7 +255,7 @@ export class ScheduleDriver extends DurableObject {
           durationMs,
           error,
         });
-        reportIssue("scheduler.alarm", error, {
+        reportIssue(this.env, "scheduler.alarm", error, {
           attributes: { ...obsContext.get(), durationMs },
         });
         throw error;
@@ -306,7 +306,7 @@ export class ScheduleDriver extends DurableObject {
         event: "scheduler.alarm.plan.failed",
         error,
       });
-      reportIssue("scheduler.alarm.plan", error, { attributes: obsContext.get() });
+      reportIssue(this.env, "scheduler.alarm.plan", error, { attributes: obsContext.get() });
     }
   }
 
@@ -319,7 +319,7 @@ export class ScheduleDriver extends DurableObject {
         event: "scheduler.alarm.arm.failed",
         error,
       });
-      reportIssue("scheduler.alarm.arm", error, { attributes: obsContext.get() });
+      reportIssue(this.env, "scheduler.alarm.arm", error, { attributes: obsContext.get() });
       throw error;
     }
   }
@@ -396,7 +396,7 @@ export class ScheduleDriver extends DurableObject {
         event: "scheduler.capabilities.missing",
         error,
       });
-      reportIssue("scheduler.capabilities.missing", error, {
+      reportIssue(this.env, "scheduler.capabilities.missing", error, {
         handled: true,
         attributes: obsContext.get(),
       });
@@ -469,7 +469,7 @@ export class ScheduleDriver extends DurableObject {
       event: "schedule.delivery.unexpected",
       error,
     });
-    reportIssue("scheduler.delivery", error, {
+    reportIssue(this.env, "scheduler.delivery", error, {
       handled: true,
       attributes: obsContext.get(),
     });
@@ -582,13 +582,13 @@ export class ScheduleDriver extends DurableObject {
 
   #readSchedule(key: string): StoredSchedule | undefined {
     const value = this.ctx.storage.kv.get<unknown>(key);
-    return value === undefined ? undefined : decodeStoredSchedule(key, value, "reject");
+    return value === undefined ? undefined : decodeStoredSchedule(this.env, key, value, "reject");
   }
 
   #listSchedules(prefix = SCHEDULE_PREFIX, limit?: number): Array<[string, StoredSchedule]> {
     const schedules: Array<[string, StoredSchedule]> = [];
     for (const [key, value] of this.ctx.storage.kv.list<unknown>({ prefix, limit })) {
-      const schedule = decodeStoredSchedule(key, value, "skip");
+      const schedule = decodeStoredSchedule(this.env, key, value, "skip");
       if (schedule) schedules.push([key, schedule]);
     }
     return schedules;
@@ -614,6 +614,7 @@ export class ScheduleDriver extends DurableObject {
 }
 
 function decodeStoredSchedule(
+  env: Pick<Cloudflare.Env, "ERROR_REPORTER">,
   key: string,
   value: unknown,
   mode: "reject" | "skip",
@@ -627,7 +628,7 @@ function decodeStoredSchedule(
     event: "scheduler.schedule-row.unsupported",
     error,
   });
-  reportIssue("scheduler.schedule-row.unsupported", error, {
+  reportIssue(env, "scheduler.schedule-row.unsupported", error, {
     handled: true,
     attributes: obsContext.get(),
   });

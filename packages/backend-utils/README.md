@@ -11,6 +11,6 @@ An observability context exposes typed `.with()` and `.get()` methods, and creat
 inherit its ambient fields.
 
 The optional `@gadgets/backend-utils/error-reporting` entry point dispatches bounded error events to
-a private Reporter bound as `ERROR_REPORTER`; `reportIssue(failureSite, caught, options?)` accepts
+a private Reporter bound as `ERROR_REPORTER`; `reportIssue(env, failureSite, caught, options?)` accepts
 ambient fields under `options.attributes`, so callers can spread the context's `.get()` result and
 augment it inline. Reporting is a no-op when the binding is absent.

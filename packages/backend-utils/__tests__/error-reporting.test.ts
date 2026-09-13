@@ -27,7 +27,7 @@ describe("reportIssue", () => {
     const error = new Error("boom");
     error.name = "APICallError";
 
-    reportIssue("overseer.run-agent", error, {
+    reportIssue(env, "overseer.run-agent", error, {
       handled: true,
       severity: "warning",
       correlation: { rayId: "ray" },
@@ -56,7 +56,7 @@ describe("reportIssue", () => {
   it("normalizes optional correlation and HTTP fields", async () => {
     await reporter.clear();
 
-    reportIssue("site", new Error("boom"), {
+    reportIssue(env, "site", new Error("boom"), {
       correlation: { requestId: "req-1" },
       http: { kind: "server", routeTemplate: "/a/:id", responseStatusCode: 0 },
     });
@@ -74,7 +74,7 @@ describe("reportIssue", () => {
     error.name = "n".repeat(MAX_STRING_CHARS + 1);
     error.stack = "s".repeat(MAX_STACK_CHARS + 1);
 
-    reportIssue("f".repeat(MAX_STRING_CHARS + 1), error);
+    reportIssue(env, "f".repeat(MAX_STRING_CHARS + 1), error);
     const event = await reporter.getLast();
 
     expect(event?.failureSite).toHaveLength(MAX_STRING_CHARS);
@@ -96,7 +96,7 @@ describe("reportIssue", () => {
     attributes.when = new Date();
     for (let i = 0; i < MAX_ATTRIBUTE_KEYS + 1; i++) attributes[`k${i}`] = i;
 
-    reportIssue("site", new Error("boom"), { attributes });
+    reportIssue(env, "site", new Error("boom"), { attributes });
     const event = await reporter.getLast();
 
     expect(Object.keys(event?.attributes ?? {})).toHaveLength(MAX_ATTRIBUTE_KEYS);
@@ -118,7 +118,7 @@ describe("reportIssue", () => {
 
     for (const [caught, expected] of cases) {
       await reporter.clear();
-      reportIssue("site", caught);
+      reportIssue(env, "site", caught);
       expect((await reporter.getLast())?.exception).toEqual(expected);
     }
   });
@@ -126,22 +126,19 @@ describe("reportIssue", () => {
   it("isolates the caller from a rejecting reporter and logs the drop", async () => {
     const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
 
-    expect(() => reportIssue("reporter-failure", new Error("boom"))).not.toThrow();
+    expect(() => reportIssue(env, "reporter-failure", new Error("boom"))).not.toThrow();
 
     await vi.waitFor(() => expect(debugSpy).toHaveBeenCalled());
     expect(debugSpy.mock.calls.map(([entry]) => entry?.event))
       .toContain("error_report.dispatch.failed");
   });
 
-  it("is a silent no-op when ERROR_REPORTER is unbound", () => {
+  it("does not fall back to ambient authority when the supplied environment has no reporter", async () => {
     const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
-    const saved = env.ERROR_REPORTER;
-    delete env.ERROR_REPORTER;
-    try {
-      expect(() => reportIssue("site", new Error("boom"))).not.toThrow();
-      expect(debugSpy).not.toHaveBeenCalled();
-    } finally {
-      env.ERROR_REPORTER = saved;
-    }
+    await reporter.clear();
+    expect(env.ERROR_REPORTER).toBeDefined();
+    expect(() => reportIssue({}, "site", new Error("boom"))).not.toThrow();
+    expect(await reporter.getLast()).toBeUndefined();
+    expect(debugSpy).not.toHaveBeenCalled();
   });
 });

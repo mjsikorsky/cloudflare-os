@@ -4008,7 +4008,7 @@ class OverseerImpl implements AgentHooks {
       // rate limit, quota/billing), which are ordinary control flow, not incidents.
       const apiStatus = apiError?.statusCode;
       if (apiStatus === undefined || apiStatus >= 500) {
-        reportIssue("overseer.run-agent", err, {
+        reportIssue(this.env, "overseer.run-agent", err, {
           attributes: obsContext.get(),
           http: apiStatus === undefined
             ? undefined
@@ -4760,7 +4760,7 @@ class OverseerImpl implements AgentHooks {
                 authorizer as unknown as ObservationAuthorizer);
             return catalog ? normalizeAgentCatalog(catalog) : null;
           } catch (error) {
-            reportIssue("overseer.catalog-fallback", error, {
+            reportIssue(this.env, "overseer.catalog-fallback", error, {
               handled: true,
               attributes: {
                 ...obsContext.get(), gadgetId: this.ctx.id.toString(), gatekeeperId,
