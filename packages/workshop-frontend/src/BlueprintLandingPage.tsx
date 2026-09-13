@@ -1,3 +1,4 @@
+import { workshopPath } from './deploymentPaths'
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { useNavigate, useParams, useRouter } from '@tanstack/react-router'
 import { RpcStub, RpcTarget } from 'capnweb'
@@ -578,7 +579,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     const overseer = authenticatedApi.newGadgetFromBlueprint(id, draftAssignments)
     try {
       let metadata = await overseer.getMetadata()
-      window.location.href = `/workspace/${metadata.id}`
+      window.location.href = workshopPath(`/workspace/${metadata.id}`)
     } catch (err: any) {
       setError(err.message || 'Failed to create gadget from blueprint.')
     } finally {
@@ -893,7 +894,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                 {sourceWorkspace && (
                   <DropdownMenu.Item
                     icon={<ArrowSquareOut size={13} className="mr-2" />}
-                    onClick={() => window.open(`/workspace/${sourceWorkspace.workspaceId}`, '_blank', 'noopener,noreferrer')}
+                    onClick={() => window.open(workshopPath(`/workspace/${sourceWorkspace.workspaceId}`), '_blank', 'noopener,noreferrer')}
                     className={MENU_ITEM}
                   >
                     Go to workspace

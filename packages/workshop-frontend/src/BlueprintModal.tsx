@@ -1,3 +1,4 @@
+import { workshopPath } from './deploymentPaths'
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
 import { Dialog, useKumoToastManager } from '@cloudflare/kumo'
 import { ArrowsClockwise, Check, Copy, ImageSquare, Pencil, Plus, Trash, Warning, X } from '@phosphor-icons/react'
@@ -530,7 +531,7 @@ export default function BlueprintModal({ open, onClose, overseer, gadget, metada
                         }
                       }}
                       onCopyLink={async () => {
-                        const url = `${window.location.origin}/blueprint/${bp.id}`
+                        const url = `${window.location.origin}${workshopPath(`/blueprint/${bp.id}`)}`
                         return copyToClipboard(url)
                       }}
                       isConfirmingDelete={confirmingDeleteId === bp.id}

@@ -1,4 +1,4 @@
-import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
+import { RpcStub, RpcTarget, newWorkersRpcResponse, newWebSocketRpcSession } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES } from '@gadgets/workshop-shared/api';
@@ -25,6 +25,7 @@ import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
+import { validateExternalIdentity, type ExternalIdentity } from "./auth/external.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
@@ -626,16 +627,36 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
   constructor(private ctx: ExecutionContext, private env: Env,
       private abortSession: (reason: Error) => void,
-      private accessPayload?: JWTPayload) {
+      private accessPayload?: JWTPayload,
+      private externalIdentity?: Readonly<ExternalIdentity>) {
     super();
     this.users = this.ctx.exports.UserDurableObject;
   }
 
+  #requireNativeAuthentication(): void {
+    if (this.externalIdentity) throw new Error("This connection uses host authentication.");
+  }
+
+  async authenticateExternal(): Promise<AuthenticatedApi> {
+    const identity = this.externalIdentity;
+    if (!identity || identity.expiresAt <= Date.now()) {
+      throw new Error("No current external identity admission.");
+    }
+    const user = this.users.get(this.users.idFromName(identity.id));
+    await user.authenticateExternal(identity.id, identity.name,
+        (await readAdminConfig(this.env)).signupsEnabled);
+    if (identity.expiresAt <= Date.now()) throw new Error("External identity admission expired.");
+    return new AuthenticatedApiImpl(this.ctx, this.env, user, this.abortSession);
+  }
+
   async getServerConfig(): Promise<ServerConfig> {
-    return getServerConfig(this.env);
+    const config = await getServerConfig(this.env);
+    return this.externalIdentity ? {...config, passwordAuthEnabled: false, authVendors: [],
+      externalAuthentication: {logoutUrl: this.externalIdentity.logoutUrl}} : config;
   }
 
   async startGatekeeperLogin(vendorId: string): Promise<{ url: string; attempt: RpcStub<LoginAttempt> }> {
+    this.#requireNativeAuthentication();
     if (!getAuthGatekeeperAllowlist(this.env).includes(vendorId)) {
       throw new Error(`Sign-in via "${vendorId}" is not enabled on this deployment.`);
     }
@@ -662,6 +683,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async authenticate(token: string): Promise<AuthenticatedApi> {
+    this.#requireNativeAuthentication();
     let split = token.split(':');
     if (split.length !== 2) {
       throw new Error("Invalid session token.");
@@ -679,6 +701,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async authenticateFromCfAccess(): Promise<AuthenticatedApi> {
+    this.#requireNativeAuthentication();
     if (!this.accessPayload) {
       throw new Error("Not authenticated with Access.");
     }
@@ -704,6 +727,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async login(username: string, passwordHash: Uint8Array): Promise<string | null> {
+    this.#requireNativeAuthentication();
     if (this.env.CF_ACCESS_AUD) {
       throw new Error("This deployment requires Cloudflare Access authentication.");
     }
@@ -730,6 +754,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
   async createAccount(username: string, displayName: string, passwordHash: Uint8Array)
       : Promise<string | null> {
+    this.#requireNativeAuthentication();
     if (this.env.CF_ACCESS_AUD) {
       throw new Error("This deployment requires Cloudflare Access authentication.");
     }
@@ -778,8 +803,18 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 }
 
-export default {
-  async fetch(req: Request, env: Env, ctx: ExecutionContext) {
+/** Serve a request admitted by an embedding host. This is a server-side integration interface;
+ * default HTTP handling never derives this authority from request headers or client arguments.
+ * The host remains responsible for authenticating every request and its tenant/workspace access.
+ */
+export async function fetchWithIdentity(
+    req: Request, env: Env, ctx: ExecutionContext, identity: ExternalIdentity): Promise<Response> {
+  const admission = validateExternalIdentity(identity, req.url);
+  return handleRequest(req, env, ctx, admission);
+}
+
+async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
+    externalIdentity?: Readonly<ExternalIdentity>): Promise<Response> {
     let url = new URL(req.url);
 
     if (url.pathname === SITE_LOGO_PATH) {
@@ -801,6 +836,11 @@ export default {
     }
 
     if (url.pathname === "/api") {
+      // A bounded host admission belongs to one live transport. HTTP batches have no retained
+      // server endpoint to revoke; they must use a separately designed authorization mechanism.
+      if (externalIdentity && req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+        return new Response("Host-authenticated RPC requires WebSocket.", {status: 426});
+      }
       // Make sure the bundled format blueprints are installed. The AdminSettings DO doesn't wake
       // merely because someone deployed, so the install needs a trigger; hanging it off API
       // traffic means a fresh deployment is provisioned by its first visitor. Fire-and-forget,
@@ -826,11 +866,11 @@ export default {
 
       let accessPayload: JWTPayload | undefined;
 
-      if (env.CF_ACCESS_AUD) {
-        if (req.headers.get("Origin") !== url.origin) {
-          return new Response("Cross-origin API access not allowed.", { status: 403 });
-        }
+      if ((externalIdentity || env.CF_ACCESS_AUD) && req.headers.get("Origin") !== url.origin) {
+        return new Response("Cross-origin API access not allowed.", {status: 403});
+      }
 
+      if (env.CF_ACCESS_AUD && !externalIdentity) {
         const payload = await verifyCfAccessJwt(req, env);
         if (!payload) return new Response("Invalid CF access JWT.", { status: 403 });
 
@@ -844,22 +884,36 @@ export default {
       // HACK: Implement `abortSession` callback by closing the websocket.
       // TODO: When ctx.abort() becomes non-experimental, consider using that instead.
       let resp: Response | undefined;
+      let hostSocket: WebSocket | undefined;
       let aborted = false;
       let abortSession = (reason: Error) => {
         aborted = true;
-        resp?.webSocket?.close();
+        if (hostSocket) hostSocket.close(1000, "Reconnect to verify access");
+        else resp?.webSocket?.close();
       };
 
-      resp = await newWorkersRpcResponse(req,
-          new PublicApiImpl(ctx, env, abortSession, accessPayload));
+      const api = new PublicApiImpl(ctx, env, abortSession, accessPayload, externalIdentity);
+      if (externalIdentity) {
+        const pair = new WebSocketPair();
+        hostSocket = pair[0];
+        hostSocket.accept();
+        newWebSocketRpcSession(hostSocket, api);
+        const timer = setTimeout(() => abortSession(new Error("Host admission expired.")),
+            Math.max(0, externalIdentity.expiresAt - Date.now()));
+        hostSocket.addEventListener("close", () => clearTimeout(timer), {once: true});
+        resp = new Response(null, {status: 101, webSocket: pair[1]});
+      } else {
+        resp = await newWorkersRpcResponse(req, api);
+      }
 
       if (aborted) {
         // Oops, we missed the abortSession() call while awaiting, apply now.
-        resp?.webSocket?.close();
+        abortSession(new Error("RPC session closed."));
       }
       return resp;
     }
 
     return new Response("Not Found", {status: 404});
-  }
-} satisfies ExportedHandler<Env>;
+}
+
+export default {fetch: handleRequest} satisfies ExportedHandler<Env>;

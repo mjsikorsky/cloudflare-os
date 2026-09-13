@@ -64,6 +64,12 @@ export interface PublicApi extends RpcTarget {
   // be used to authenticate the user.
   authenticateFromCfAccess(): Promise<AuthenticatedApi>;
 
+  /** Authenticate as the identity admitted by a trusted embedding host for this connection.
+   * Refuses when the server was not invoked through its external authentication entry point.
+   * The client supplies no identity, token, or permissions.
+   */
+  authenticateExternal(): Promise<AuthenticatedApi>;
+
   // Login with username and password.
   //
   // Returns a token to store in local storage and pass to `authenticate()` in the future.
@@ -848,6 +854,8 @@ export type AuthVendorInfo = {
 // Deployment-level configuration that the client needs at boot to decide what UI to render.
 // Returned by `PublicApi.getServerConfig()`. Contains no secrets.
 export type ServerConfig = {
+  /** Present only on connections admitted by an embedding host. The host owns sign-out. */
+  externalAuthentication?: { logoutUrl: string };
   // Auth-capable, allowlisted gatekeeper vendors offered as sign-in methods. Empty when none are
   // configured (password-only).
   authVendors: AuthVendorInfo[];

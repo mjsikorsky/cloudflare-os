@@ -1,3 +1,4 @@
+import { workshopPath } from './deploymentPaths'
 import { useState, FormEvent } from "react";
 import { Link } from "@tanstack/react-router";
 import { RpcStub } from "capnweb";
@@ -66,7 +67,7 @@ export default function SignupPage({ rpcStub }: SignupPageProps) {
       );
       if (token) {
         localStorage.setItem("authToken", token);
-        window.location.href = "/";
+        window.location.href = workshopPath("/");
       } else {
         setError("Username already exists");
       }

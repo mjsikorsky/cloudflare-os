@@ -1,3 +1,4 @@
+import { parseWorkspaceId } from '../workspaceSearch'
 import { createFileRoute } from '@tanstack/react-router'
 import GadgetEditor from '../GadgetEditor'
 
@@ -8,21 +9,10 @@ type GadgetSearch = {
   w?: number
 }
 
-function parseIntParam(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isInteger(value)) return value
-  if (typeof value === 'string' && value !== '') {
-    const parsed = Number(value)
-    if (Number.isInteger(parsed)) return parsed
-  }
-  return undefined
-}
-
 export const Route = createFileRoute('/workspace/$id')({
   component: GadgetEditor,
   validateSearch: (search: Record<string, unknown>): GadgetSearch => ({
-    chat: typeof search.chat === 'number' ? search.chat
-      : typeof search.chat === 'string' ? Number(search.chat) || undefined
-      : undefined,
-    w: parseIntParam(search.w),
+    chat: parseWorkspaceId(search.chat),
+    w: parseWorkspaceId(search.w),
   }),
 })

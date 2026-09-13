@@ -1,3 +1,4 @@
+import { useGadgetClient } from './useGadgetClient'
 import { useState, useEffect, useCallback, useMemo, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { useParams, useNavigate, useSearch, Link } from '@tanstack/react-router'
 import { useKumoToastManager } from '@cloudflare/kumo'
@@ -19,7 +20,6 @@ import UserMenu from './components/UserMenu'
 import SiteLogo from './components/SiteLogo'
 
 import {
-  GadgetClient,
   AiChatAuthorInfo,
   ConsoleLogSubscriber,
   ConsoleLogEvent,
@@ -435,10 +435,6 @@ export default function GadgetEditor() {
   const [workpieces, setWorkpieces] = useState<Map<WorkpieceId, WorkpieceSummary>>(new Map())
   const [workpiecesReady, setWorkpiecesReady] = useState(false)
   const knownWorkpieceIdsRef = useRef<Set<WorkpieceId> | null>(null)
-  // GadgetClient stub for the currently-selected gadget workpiece. Per-gadget operations (UI
-  // bundle, RPC connection, bindings, blueprints) go through this stub. Null while the workspace
-  // has no (visible) gadgets.
-  const [gadget, setGadget] = useState<{ id: WorkpieceId; stub: RpcStub<GadgetClient> } | null>(null)
 
   // ── title editing ────────────────────────────────────────────────────────────
   const [isEditingTitle, setIsEditingTitle] = useState(false)
@@ -702,8 +698,7 @@ export default function GadgetEditor() {
   const selectedFilesRoot = selectedGadgetSummary?.filesRoot
   // The stub for the selected gadget arrives via an effect; during a switch it briefly lags the
   // selection, in which case gadget-dependent views render their empty states for a frame.
-  const selectedGadgetStub =
-    gadget !== null && gadget.id === selectedGadgetId ? gadget.stub : null
+  const selectedGadgetStub = useGadgetClient(overseer?.stub ?? null, selectedGadgetId)
   // Only the selected chat's streaming drives this editor. Everything downstream then narrows it
   // further to the selected gadget.
   const streamingActiveFile = streamingActiveFileState?.chatId === effectiveSelectedChatId
@@ -1120,19 +1115,6 @@ export default function GadgetEditor() {
     }
   }, [overseer])
 
-  // ── selected gadget stub ────────────────────────────────────────────────────────
-  // Open a GadgetClient for the selected workpiece. getGadget() pipelines on the overseer stub,
-  // so the stub is usable immediately with no extra round trip.
-  useEffect(() => {
-    if (!overseer || selectedGadgetId === null) {
-      setGadget(null)
-      return
-    }
-    const stub = overseer.stub.getGadget(selectedGadgetId)
-    setGadget({ id: selectedGadgetId, stub })
-    return () => { stub[Symbol.dispose]() }
-  }, [overseer, selectedGadgetId])
-
   // ── follow the agent across gadgets ─────────────────────────────────────────────
   // When the agent starts editing a gadget other than the selected one, switch the picker to it,
   // unless the user picked a workpiece themselves during this turn.
@@ -1283,7 +1265,7 @@ export default function GadgetEditor() {
   // Wait for the workpiece list (and the first selected-gadget stub, which follows it by one
   // effect pass) before rendering; a workspace with no gadgets renders with `gadget` null.
   if (!metadata || !overseer || !workpiecesReady ||
-      (selectedGadgetId !== null && gadget === null)) {
+      (selectedGadgetId !== null && selectedGadgetStub === null)) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-kumo-base">
         <div className="flex flex-col items-center gap-3">

@@ -1,3 +1,4 @@
+import { workshopPath } from './deploymentPaths'
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { Checkbox, Dialog, DropdownMenu, useKumoToastManager } from '@cloudflare/kumo'
 import type { PortalContainer } from '@cloudflare/kumo'
@@ -535,7 +536,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
 
   // Where an invited collaborator opens the workspace. Adding them already granted access, so this
   // carries no secret and is safe to show and re-show — unlike a share link, whose URL embeds a key.
-  const workspaceUrl = `${window.location.origin}/workspace/${metadata.id}`
+  const workspaceUrl = `${window.location.origin}${workshopPath(`/workspace/${metadata.id}`)}`
 
   const copyWorkspaceUrl = async () => {
     if (await copyToClipboard(workspaceUrl)) {
@@ -590,7 +591,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     try {
       const { key, linkId } = await overseer.createShareLink(
         newLinkRole, newLinkNote.trim() || undefined)
-      const url = `${window.location.origin}/workspace/${metadata.id}#share=${key}`
+      const url = `${window.location.origin}${workshopPath(`/workspace/${metadata.id}`)}#share=${key}`
       setNewShareLink(url)
       setNewShareLinkCopied(false)
       setNewLinkNote('')
@@ -618,7 +619,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
       let url = copiedUrlsRef.current.get(linkId)
       if (!url) {
         const { key } = await overseer.newShareLinkKey(linkId)
-        url = `${window.location.origin}/workspace/${metadata.id}#share=${key}`
+        url = `${window.location.origin}${workshopPath(`/workspace/${metadata.id}`)}#share=${key}`
         copiedUrlsRef.current.set(linkId, url)
       }
       const copied = await copyToClipboard(url)

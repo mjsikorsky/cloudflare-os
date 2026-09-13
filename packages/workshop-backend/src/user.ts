@@ -326,6 +326,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return false;
   }
 
+  /** Initialize a host-admitted identity without minting a reusable native login token. */
+  async authenticateExternal(id: string, name: string, allowCreate: boolean): Promise<boolean> {
+    if (this.storage.created.get()) return false;
+    if (!allowCreate) throw new Error("New sign-ups are currently disabled on this deployment.");
+    this.storage.created.put(true);
+    this.storage.profile.put({type: "user", id, name});
+    return true;
+  }
+
   async #newSessionToken(): Promise<string> {
     let sessionToken = new Uint8Array(32);
     crypto.getRandomValues(sessionToken);

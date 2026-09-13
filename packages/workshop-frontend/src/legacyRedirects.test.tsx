@@ -22,7 +22,7 @@ window.scrollTo = () => {};
 // Exercises the real legacy-route module (routes/gadget.$id.tsx) against a stub /workspace/$id
 // target, the same way routeTree.gen.ts wires it into the app's router. The stub avoids
 // rendering the heavyweight editor; only the redirect behavior is under test.
-function makeRouter(initialEntry: string) {
+function makeRouter(initialEntry: string, basepath = "/") {
   const rootRoute = createRootRoute({ component: () => <Outlet /> });
   const workspaceRoute = createRoute({
     getParentRoute: () => rootRoute,
@@ -37,6 +37,7 @@ function makeRouter(initialEntry: string) {
   const history = createMemoryHistory({ initialEntries: [initialEntry] });
   return createRouter({
     history,
+    basepath,
     routeTree: rootRoute.addChildren([workspaceRoute, gadgetRoute]),
   });
 }
@@ -50,8 +51,8 @@ describe("legacy workspace URL redirects", () => {
     container?.remove();
   });
 
-  async function renderAt(initialEntry: string) {
-    const router = makeRouter(initialEntry);
+  async function renderAt(initialEntry: string, basepath = "/") {
+    const router = makeRouter(initialEntry, basepath);
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -75,6 +76,15 @@ describe("legacy workspace URL redirects", () => {
     expect(router.state.location.pathname).toBe("/workspace/my-workspace");
     expect(router.state.location.search).toEqual({});
     expect(router.state.location.hash).toBe("");
+  });
+
+  it("preserves chat zero, workpiece zero, and share hash under a mounted native router", async () => {
+    const router = await renderAt("/workshop/gadget/my-workspace?chat=0&w=0#share=abc123", "/workshop");
+    expect(router.state.location.pathname).toBe("/workspace/my-workspace");
+    expect(router.history.location.pathname).toBe("/workshop/workspace/my-workspace");
+    expect(router.state.location.search).toEqual({ chat: 0, w: 0 });
+    expect(router.state.location.hash).toBe("share=abc123");
+    expect(router.history.length).toBe(1);
   });
 
 });
