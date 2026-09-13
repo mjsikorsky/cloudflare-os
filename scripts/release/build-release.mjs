@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 // Builds an immutable release: every deployable worker bundled exactly as `wrangler deploy`
-// would upload it (dry-run + outdir, with the repo's pinned wrangler), plus the Access-mode
-// workshop-frontend asset build, plus the release manifest that describes it all.
+// would upload it (dry-run + outdir, with the repo's pinned wrangler), plus the configured
+// native workshop-frontend asset build and the release manifest that describes it all.
 //
 // Output layout (mirrored to R2 by upload-release.mjs):
 //   <out>/manifest.json                    the release manifest (upload LAST — its presence
@@ -11,8 +11,10 @@
 //   <out>/assets/<cfHash>                  static asset blobs, content-addressed
 //
 // Usage: node scripts/release/build-release.mjs --out <dir> [--release-id <id>]
+//        [--auth-mode access|host] [--frontend-base /workshop/]
 
 import { execFileSync } from "node:child_process";
+import { parseReleaseArgs, frontendBuildSettings } from "./build-options.mjs";
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,17 +30,6 @@ import {
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PACKAGES_DIR = join(ROOT, "packages");
 const FRONTEND_DIR = join(PACKAGES_DIR, "workshop-frontend");
-
-function parseArgs(argv) {
-  const args = { out: undefined, releaseId: undefined };
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--out") args.out = resolve(argv[++i]);
-    else if (argv[i] === "--release-id") args.releaseId = argv[++i];
-    else throw new Error(`unknown argument: ${argv[i]}`);
-  }
-  if (!args.out) throw new Error("--out <dir> is required");
-  return args;
-}
 
 function run(command, argv, options = {}) {
   console.log(`running: ${command} ${argv.join(" ")} ${options.cwd ? `(in ${options.cwd})` : ""}`);
@@ -70,16 +61,16 @@ function pinnedWranglerVersion() {
   return pkg.version;
 }
 
-// Builds the Access-mode frontend (VITE_CF_ACCESS_MODE is a build-time flag,
-// workshop-frontend/src/useAuth.ts) — the one asset variant every release carries.
-function buildFrontend() {
-  const env = { ...process.env, VITE_CF_ACCESS_MODE: "true" };
-  run("pnpm", ["run", "build"], { cwd: FRONTEND_DIR, env });
+// Each release carries one explicitly named asset variant. Vite's native --base option
+// controls asset URLs and the native router mount; authentication comes from its native mode.
+function buildFrontend(settings) {
+  run("pnpm", settings.argv, { cwd: FRONTEND_DIR, env: settings.env });
   return collectAssets(join(FRONTEND_DIR, "dist"));
 }
 
 function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseReleaseArgs(process.argv.slice(2));
+  const frontend = frontendBuildSettings(args);
   const commit = gitCommit();
   const releaseId = args.releaseId ?? defaultReleaseId(commit);
   const wranglerVersion = pinnedWranglerVersion();
@@ -92,7 +83,7 @@ function main() {
   // 1. Frontend first: the router's wrangler.jsonc points its assets directory at
   //    workshop-frontend/dist, so it must exist before the router's dry-run.
   const assetVariants = {
-    access: buildFrontend(),
+    [frontend.variant]: buildFrontend(frontend),
   };
   for (const { blobs } of Object.values(assetVariants)) {
     for (const [hash, blob] of blobs) {
