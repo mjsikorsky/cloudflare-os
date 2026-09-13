@@ -48,3 +48,8 @@ export function frontendBuildSettings(options, environment = process.env) {
     env: { ...environment, VITE_CF_ACCESS_MODE: variant === "access" ? "true" : "false" },
   };
 }
+
+/** Select this native package even when an embedding repository has a deploy-config redirect. */
+export function workerBuildSettings(outDir) {
+  return { argv: ["exec", "wrangler", "deploy", "--config", "wrangler.jsonc", "--dry-run", "--outdir", outDir] };
+}

@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseReleaseArgs, frontendBuildSettings, frontendBasePath } from "./release/build-options.mjs";
+import { parseReleaseArgs, frontendBuildSettings, frontendBasePath, workerBuildSettings } from "./release/build-options.mjs";
 
 test("release defaults retain the Access/root variant", () => {
   const options = parseReleaseArgs(["--out", "release"], "/repo");
@@ -47,4 +47,35 @@ test("invalid or incomplete options fail before output replacement", () => {
     assert.throws(() => execFileSync(process.execPath, [fileURLToPath(new URL("./release/build-release.mjs", import.meta.url)), "--out", directory, "--frontend-base", "https://other.example/"], { stdio: "pipe" }));
     assert.equal(readFileSync(sentinel, "utf8"), "existing build evidence");
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+
+test("native release bundle ignores an embedding repository's deploy-config redirect", () => {
+  const directory = mkdtempSync(join(tmpdir(), "native-release-config-"));
+  const packageDir = join(directory, "vendored", "cf-os", "packages", "native-worker");
+  const hostDir = join(directory, "host");
+  const redirectDir = join(directory, ".wrangler", "deploy");
+  for (const dir of [packageDir, hostDir, redirectDir]) mkdirSync(dir, { recursive: true });
+  const config = name => JSON.stringify({ name, main: "worker.js", compatibility_date: "2026-02-02" });
+  writeFileSync(join(packageDir, "wrangler.jsonc"), config("native-release-fixture"));
+  writeFileSync(join(packageDir, "worker.js"), 'export default {fetch(){return new Response("NATIVE_PACKAGE_SENTINEL")}}');
+  writeFileSync(join(hostDir, "wrangler.jsonc"), config("embedding-host-fixture"));
+  writeFileSync(join(hostDir, "worker.js"), 'export default {fetch(){return new Response("EMBEDDING_HOST_SENTINEL")}}');
+  writeFileSync(join(redirectDir, "config.json"), JSON.stringify({ configPath: "../../host/wrangler.jsonc" }));
+  const wrangler = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));
+  const env = { ...process.env, WRANGLER_SEND_METRICS: "false", WRANGLER_LOG_PATH: join(directory, "wrangler-logs") };
+  const run = args => execFileSync(process.execPath, [wrangler, ...args], { cwd: packageDir, env, stdio: "pipe", timeout: 30000 });
+  const redirectedOut = join(directory, "redirected");
+  const nativeOut = join(directory, "native");
+  // The control proves the ancestor redirect makes implicit native config selection ambiguous.
+  assert.throws(() => run(["deploy", "--dry-run", "--outdir", redirectedOut]), error => {
+    assert.equal(error.status, 1);
+    assert.match(error.stderr.toString(), /do not share the same base path/);
+    return true;
+  });
+  run(workerBuildSettings(nativeOut).argv.slice(2)); // same arguments as pnpm exec wrangler
+  const actual = readFileSync(join(nativeOut, "worker.js"), "utf8");
+  assert.match(actual, /NATIVE_PACKAGE_SENTINEL/);
+  assert.doesNotMatch(actual, /EMBEDDING_HOST_SENTINEL/);
+  // Retain the fixture, bundle and logs as evidence, including on assertion failure.
 });

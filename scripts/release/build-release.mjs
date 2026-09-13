@@ -14,7 +14,7 @@
 //        [--auth-mode access|host] [--frontend-base /workshop/]
 
 import { execFileSync } from "node:child_process";
-import { parseReleaseArgs, frontendBuildSettings } from "./build-options.mjs";
+import { parseReleaseArgs, frontendBuildSettings, workerBuildSettings } from "./build-options.mjs";
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -97,7 +97,7 @@ function main() {
   const workers = [];
   for (const pkg of findDeployablePackages(PACKAGES_DIR)) {
     const outDir = join(bundleDir, pkg.name);
-    run("pnpm", ["exec", "wrangler", "deploy", "--dry-run", "--outdir", outDir],
+    run("pnpm", workerBuildSettings(outDir).argv,
         { cwd: pkg.dir });
     const { mainModule, modules } = collectModules(outDir);
     for (const mod of modules) {
