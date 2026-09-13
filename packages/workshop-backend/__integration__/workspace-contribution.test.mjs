@@ -25,7 +25,7 @@ const author = {id: 'dsh:isolated-session', name: 'DSH test agent'};
 before(async () => {
   const output = mkdtempSync(join(tmpdir(), 'cfos-contribution-native-'));
   execFileSync('pnpm', ['run', 'build:format-blueprints'], {cwd: packageRoot, stdio: 'inherit'});
-  execFileSync('pnpm', ['exec', 'wrangler', 'deploy', '--dry-run', '--outdir', output], {
+  execFileSync('pnpm', ['exec', 'wrangler', 'deploy', '--config', 'wrangler.jsonc', '--dry-run', '--outdir', output], {
     cwd: packageRoot, stdio: 'inherit', env: {...process.env, WRANGLER_SEND_METRICS: 'false'},
   });
   const config = readWranglerConfig(packageRoot);
