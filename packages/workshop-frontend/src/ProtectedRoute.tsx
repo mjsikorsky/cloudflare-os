@@ -1,7 +1,7 @@
 import { ReactNode } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi } from '@gadgets/workshop-shared/api'
-import { useAuth, CF_ACCESS_MODE } from './useAuth'
+import { useAuth } from './useAuth'
 import { AuthProvider } from './AuthContext'
 import LoginPage from './LoginPage'
 import { Loader, Banner, Button } from '@cloudflare/kumo'
@@ -12,7 +12,7 @@ interface ProtectedRouteProps {
 }
 
 export default function ProtectedRoute({ children, rpcStub }: ProtectedRouteProps) {
-  const { isAuthenticated, authenticatedApi, isLoading, error, logout, login } = useAuth(rpcStub)
+  const { isAuthenticated, authenticatedApi, isLoading, error, logout, login, externallyManaged } = useAuth(rpcStub)
 
   const handleLoginSuccess = () => {
     // Trigger re-authentication by calling login with stored token
@@ -67,11 +67,9 @@ export default function ProtectedRoute({ children, rpcStub }: ProtectedRouteProp
     )
   }
 
-  // In CF Access mode the user is always authenticated (Access enforces login before the
-  // app loads), so we never show the login page. If not authenticated yet, keep the
-  // spinner up while the pipelined authenticateFromCfAccess() call resolves.
+  // Externally managed deployments authenticate through their native admission interface.
   if (!isAuthenticated) {
-    if (CF_ACCESS_MODE) {
+    if (externallyManaged) {
       return (
         <div
           style={{

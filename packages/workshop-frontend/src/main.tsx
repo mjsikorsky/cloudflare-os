@@ -1,8 +1,9 @@
+import { useServerConfigConnection } from './useServerConfigConnection'
 import { StrictMode, useState, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from '@tanstack/react-router'
 import { RpcStub, newWebSocketRpcSession } from 'capnweb'
-import { PublicApi, ServerConfig } from '@gadgets/workshop-shared/api'
+import { PublicApi } from '@gadgets/workshop-shared/api'
 import { RpcContext } from './RpcContext'
 import { ServerConfigContext, ServerConfigErrorContext } from './ServerConfigContext'
 import { ThemeProvider } from './ThemeContext'
@@ -12,7 +13,7 @@ import { applyAccentColor, applyStoredThemeMode } from './theme'
 import './styles.css'
 import FrontendErrorBoundary from './FrontendErrorBoundary'
 import { installWorkshopErrorReporting, reportIssue } from './errorReporting'
-import { applySiteFavicon, cacheBustSiteLogoUrl } from './siteLogoUtils'
+import { applySiteFavicon } from './siteLogoUtils'
 
 // ---------------------------------------------------------------------------
 // Dev auto-login: if VITE_DEV_AUTO_LOGIN=true, automatically create/login
@@ -126,32 +127,13 @@ function AppWithConnection() {
     stub: currentStub,
     connectionLost: isConnectionLost,
   });
-  const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
-  const [serverConfigError, setServerConfigError] = useState(false);
+  const { config: serverConfig, error: serverConfigError } = useServerConfigConnection(rpcState.stub);
 
   useEffect(() => {
     let cb = () => setRpcState({ stub: currentStub, connectionLost: isConnectionLost });
     notifyCurrentStubUpdated.add(cb);
     return () => { notifyCurrentStubUpdated.delete(cb); };
   }, []);
-
-  // Fetch deployment config once the (re)connected stub is available. Re-fetch on reconnect so a
-  // server restart with changed config is picked up.
-  useEffect(() => {
-    let cancelled = false;
-    setServerConfigError(false);
-    rpcState.stub.getServerConfig()
-      .then((cfg) => {
-        if (!cancelled) {
-          setServerConfig(cfg.siteLogo ? {
-            ...cfg,
-            siteLogo: { url: cacheBustSiteLogoUrl(cfg.siteLogo.url) },
-          } : cfg);
-        }
-      })
-      .catch(() => { if (!cancelled) setServerConfigError(true); });
-    return () => { cancelled = true; };
-  }, [rpcState.stub]);
 
   // Apply the deployment's admin-chosen accent color (overrides brand CSS vars at runtime).
   useEffect(() => {

@@ -1,124 +1,113 @@
 import { useState, useEffect, useRef } from 'react'
-import { RpcStub } from 'capnweb'
-import { PublicApi, AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import type { RpcStub } from 'capnweb'
+import type { PublicApi, AuthenticatedApi, ServerConfig } from '@gadgets/workshop-shared/api'
+import { useServerConfig, useServerConfigError } from './ServerConfigContext'
+import { externalLogoutUrl } from './deploymentPaths'
 
 const CF_ACCESS_MODE = import.meta.env.VITE_CF_ACCESS_MODE === 'true'
+export { CF_ACCESS_MODE }
 
 interface AuthState {
+  owner: RpcStub<PublicApi> | null
+  config: ServerConfig | null
   token: string | null
   authenticatedApi: RpcStub<AuthenticatedApi> | null
   isLoading: boolean
   error: string | null
 }
-
-export { CF_ACCESS_MODE }
+interface AuthAttempt {
+  api: RpcStub<AuthenticatedApi> | null
+  cancelled: boolean
+}
+const INITIAL_AUTH: AuthState = {
+  owner: null, config: null, token: null, authenticatedApi: null, isLoading: true, error: null,
+}
 
 export function useAuth(publicApi: RpcStub<PublicApi>) {
-  const [authState, setAuthState] = useState<AuthState>({
-    token: null,
-    authenticatedApi: null,
-    isLoading: true,
-    error: null
-  })
+  const config = useServerConfig()
+  const configError = useServerConfigError()
+  const logoutUrl = config?.externalAuthentication?.logoutUrl
+  const externallyManaged = logoutUrl !== undefined || CF_ACCESS_MODE
+  const [authState, setAuthState] = useState<AuthState>(INITIAL_AUTH)
+  const currentAttempt = useRef<AuthAttempt | null>(null)
 
-  // Track current authenticated API stub for cleanup on unmount.
-  // State closures go stale in cleanup functions, so we use a ref.
-  const authenticatedApiRef = useRef<RpcStub<AuthenticatedApi> | null>(null)
-  authenticatedApiRef.current = authState.authenticatedApi
+  function discardAttempt() {
+    const attempt = currentAttempt.current
+    currentAttempt.current = null
+    if (attempt) {
+      attempt.cancelled = true
+      attempt.api?.[Symbol.dispose]()
+    }
+  }
+
+  function authenticate(token: string | null) {
+    discardAttempt()
+    if (!config || configError) return
+    const attempt: AuthAttempt = { api: null, cancelled: false }
+    currentAttempt.current = attempt
+    const pending: AuthState = { owner: publicApi, config, token, authenticatedApi: null, isLoading: true, error: null }
+    setAuthState(pending)
+    const fail = (error: unknown) => {
+      if (attempt.cancelled || currentAttempt.current !== attempt) return
+      discardAttempt()
+      setAuthState({ ...pending, isLoading: false, error: error instanceof Error ? error.message : 'Authentication failed.' })
+    }
+    try {
+      if (logoutUrl !== undefined) externalLogoutUrl(logoutUrl, window.location.origin)
+      // Native promise pipelining sends the proof call through the unresolved admission;
+      // no browser identity, token or permission is supplied for external authentication.
+      const api = logoutUrl !== undefined ? publicApi.authenticateExternal()
+        : CF_ACCESS_MODE ? publicApi.authenticateFromCfAccess()
+        : publicApi.authenticate(token!)
+      attempt.api = api
+      api.onRpcBroken(fail)
+      api.whoami().then(() => {
+        if (attempt.cancelled || currentAttempt.current !== attempt) return
+        setAuthState({ ...pending, authenticatedApi: api, isLoading: false })
+      }).catch(fail)
+    } catch (error) { fail(error) }
+  }
 
   useEffect(() => {
-    if (CF_ACCESS_MODE) {
-      authenticateWithCfAccess()
-    } else {
-      const storedToken = localStorage.getItem('authToken')
-      if (storedToken) {
-        authenticateWithToken(storedToken)
-      } else {
-        setAuthState(prev => ({ ...prev, isLoading: false }))
-      }
-    }
-    return () => {
-      // The authenticateWithXxx functions also dispose the old stub via their setAuthState
-      // updater, so this may double-dispose on reconnect. That's fine — dispose is idempotent.
-      authenticatedApiRef.current?.[Symbol.dispose]()
-    }
-  }, [publicApi])
-
-  const authenticateWithCfAccess = () => {
-    setAuthState(prev => {
-      if (prev.authenticatedApi) {
-        prev.authenticatedApi[Symbol.dispose]()
-      }
-      return { ...prev, authenticatedApi: null, isLoading: true, error: null }
-    })
-
-    // Use promise pipelining - no need to await. The CF Access JWT is already attached
-    // to the request by the browser (injected by the Access service worker/cookie), so
-    // the server validates it and returns an authenticated stub immediately.
-    const authenticatedApi = publicApi.authenticateFromCfAccess()
-    setAuthState({
-      token: null,
-      authenticatedApi,
-      isLoading: false,
-      error: null
-    })
-  }
-
-  const authenticateWithToken = (token: string) => {
-    setAuthState(prev => {
-      // Dispose the previous authenticated API stub if it exists
-      if (prev.authenticatedApi) {
-        prev.authenticatedApi[Symbol.dispose]()
-      }
-      return {
-        ...prev,
-        authenticatedApi: null, // Clear the disposed stub
-        isLoading: true,
-        error: null
-      }
-    })
-
-    // Use promise pipelining - we can use the returned promise as a stub immediately
-    // without awaiting. Authentication errors will be handled when the stub is actually used.
-    const authenticatedApi = publicApi.authenticate(token)
-    setAuthState({
-      token,
-      authenticatedApi,
-      isLoading: false,
-      error: null
-    })
-  }
+    discardAttempt()
+    if (!config || configError) return
+    const token = externallyManaged ? null : localStorage.getItem('authToken')
+    if (externallyManaged || token) authenticate(token)
+    else setAuthState({ ...INITIAL_AUTH, owner: publicApi, config, isLoading: false })
+    return discardAttempt
+  }, [publicApi, config, configError])
 
   const login = (token: string) => {
-    authenticateWithToken(token)
+    if (!externallyManaged) authenticate(token)
   }
-
   const logout = () => {
+    if (logoutUrl !== undefined) {
+      const url = externalLogoutUrl(logoutUrl, window.location.origin)
+      discardAttempt()
+      setAuthState({ ...INITIAL_AUTH, owner: publicApi, config, isLoading: false })
+      // The host owns its session; leaving only the iframe would keep the outer shell signed in.
+      const host = window.top ?? window
+      host.location.assign(url)
+      return
+    }
     if (CF_ACCESS_MODE) {
       window.location.assign('/cdn-cgi/access/logout')
       return
     }
-
-    // Use functional updater to read current state (avoids stale closure).
-    setAuthState(prev => {
-      if (prev.authenticatedApi) {
-        prev.authenticatedApi[Symbol.dispose]()
-      }
-      return {
-        token: null,
-        authenticatedApi: null,
-        isLoading: false,
-        error: null
-      }
-    })
-
+    discardAttempt()
+    setAuthState({ ...INITIAL_AUTH, owner: publicApi, config, isLoading: false })
     localStorage.removeItem('authToken')
   }
 
+  // Never expose a capability from the old root/config during the render before effects run.
+  const current = !!config && !configError && authState.owner === publicApi && authState.config === config
+  const authenticatedApi = current ? authState.authenticatedApi : null
   return {
-    ...authState,
-    login,
-    logout,
-    isAuthenticated: !!authState.authenticatedApi
+    token: current ? authState.token : null,
+    authenticatedApi,
+    isLoading: !configError && (!current || authState.isLoading),
+    error: configError ? 'The server authentication configuration could not be loaded.' : current ? authState.error : null,
+    externallyManaged, login, logout,
+    isAuthenticated: !!authenticatedApi,
   }
 }

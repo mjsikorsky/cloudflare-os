@@ -14,3 +14,11 @@ export function workshopPath(path: string, base = import.meta.env.BASE_URL): str
   return basePath(base) + path
 }
 
+/** External authentication may only return people to a sign-out route on this origin. */
+export function externalLogoutUrl(value: string, origin: string): string {
+  const url = new URL(value, origin)
+  if (url.origin !== origin || url.username || url.password) {
+    throw new Error('External sign-out must use this origin.')
+  }
+  return url.href
+}

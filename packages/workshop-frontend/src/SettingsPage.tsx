@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from 'react'
 import { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { hashPassword } from './passwordHash'
 import { CF_ACCESS_MODE } from './useAuth'
+import { useServerConfig } from './ServerConfigContext'
 import { User, Pencil, Check, X, Lock, Camera, Copy, Eye, EyeSlash } from '@phosphor-icons/react'
 import { useAvatar, invalidateAvatarCache } from './useAvatar'
 import { compressAvatar, avatarBlobUrl } from './avatarUtils'
@@ -85,6 +86,7 @@ function PasswordField({
 }
 
 export default function SettingsPage() {
+  const externallyManaged = CF_ACCESS_MODE || !!useServerConfig()?.externalAuthentication
   useDocumentTitle('Profile')
 
   const { authenticatedApi } = useAuthenticatedApi()
@@ -381,7 +383,7 @@ export default function SettingsPage() {
         <UsageSettings />
 
         {/* Security — only for password accounts (hidden under CF Access or gatekeeper sign-in) */}
-        {!CF_ACCESS_MODE && hasPassword === true && (
+        {!externallyManaged && hasPassword === true && (
           <section className="flex flex-col gap-3">
             <SectionLabel>Security</SectionLabel>
             <div className="rounded-xl border border-kumo-line bg-kumo-base p-5">
