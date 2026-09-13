@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from 'react'
+import React from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
@@ -23,12 +23,12 @@ function deferred<T>() {
 function session() {
   const proof = deferred<AiChatAuthorInfo>()
   let broken!: (error: Error) => void
-  const dispose = vi.fn()
-  const api = { whoami: vi.fn(() => proof.promise), onRpcBroken: vi.fn((callback) => { broken = callback }), [Symbol.dispose]: dispose } as unknown as RpcStub<AuthenticatedApi>
+  const dispose = vi.fn<() => void>()
+  const api = { whoami: vi.fn<AuthenticatedApi["whoami"]>(() => proof.promise), onRpcBroken: vi.fn<(callback: (error: Error) => void) => void>((callback) => { broken = callback }), [Symbol.dispose]: dispose } as unknown as RpcStub<AuthenticatedApi>
   return { api, proof, dispose, break: (error: Error) => broken(error) }
 }
 function publicApi(auth: RpcStub<AuthenticatedApi>) {
-  const methods = { authenticateExternal: vi.fn(() => auth), authenticateFromCfAccess: vi.fn(() => auth), authenticate: vi.fn(() => auth) }
+  const methods = { authenticateExternal: vi.fn<() => RpcStub<AuthenticatedApi>>(() => auth), authenticateFromCfAccess: vi.fn<() => RpcStub<AuthenticatedApi>>(() => auth), authenticate: vi.fn<(token: string) => RpcStub<AuthenticatedApi>>(() => auth) }
   return { api: methods as unknown as RpcStub<PublicApi>, methods }
 }
 const profile = { id: 'person', name: 'Person', type: 'user' } as AiChatAuthorInfo
@@ -42,10 +42,10 @@ describe('native authentication admission', () => {
   async function render(api: RpcStub<PublicApi>, config: ServerConfig | null = externalConfig, error = false) {
     fixture.config = config; fixture.error = error
     if (!root) { container = document.createElement('div'); root = createRoot(container) }
-    await act(async () => root!.render(<View api={api} />))
+    await React.act(async () => root!.render(<View api={api} />))
   }
   afterEach(async () => {
-    await act(async () => root?.unmount())
+    await React.act(async () => root?.unmount())
     root = undefined; container?.remove(); rendered.length = 0
     localStorage.clear(); fixture.config = null; fixture.error = false
   })
@@ -61,14 +61,14 @@ describe('native authentication admission', () => {
     expect(publicRoot.methods.authenticateFromCfAccess).not.toHaveBeenCalled()
     expect(auth.api.whoami).toHaveBeenCalledOnce()
     expect(state!.isAuthenticated).toBe(false)
-    await act(async () => auth.proof.resolve(profile))
+    await React.act(async () => auth.proof.resolve(profile))
     expect(state!.authenticatedApi).toBe(auth.api)
     expect(state!.isLoading).toBe(false)
   })
   it('surfaces an expired admission and disposes the rejected capability', async () => {
     const auth = session(), publicRoot = publicApi(auth.api)
     await render(publicRoot.api)
-    await act(async () => auth.proof.reject(new Error('Host admission expired.')))
+    await React.act(async () => auth.proof.reject(new Error('Host admission expired.')))
     expect(state!.isAuthenticated).toBe(false)
     expect(state!.isLoading).toBe(false)
     expect(state!.error).toBe('Host admission expired.')
@@ -80,10 +80,10 @@ describe('native authentication admission', () => {
     await render(firstRoot.api)
     await render(secondRoot.api, null)
     expect(first.dispose).toHaveBeenCalledOnce()
-    await act(async () => first.proof.resolve(profile))
+    await React.act(async () => first.proof.resolve(profile))
     expect(state!.authenticatedApi).toBeNull()
     await render(secondRoot.api)
-    await act(async () => second.proof.resolve(profile))
+    await React.act(async () => second.proof.resolve(profile))
     expect(state!.authenticatedApi).toBe(second.api)
     expect(rendered.every(value => value.authenticatedApi !== first.api)).toBe(true)
   })
@@ -91,7 +91,7 @@ describe('native authentication admission', () => {
     const first = session(), second = session()
     const firstRoot = publicApi(first.api), secondRoot = publicApi(second.api)
     await render(firstRoot.api)
-    await act(async () => first.proof.resolve(profile))
+    await React.act(async () => first.proof.resolve(profile))
     const before = rendered.length
     await render(secondRoot.api)
     expect(rendered.slice(before).every(value => value.authenticatedApi === null)).toBe(true)
@@ -100,8 +100,8 @@ describe('native authentication admission', () => {
   it('revokes a confirmed session when its RPC capability breaks', async () => {
     const auth = session(), publicRoot = publicApi(auth.api)
     await render(publicRoot.api)
-    await act(async () => auth.proof.resolve(profile))
-    await act(async () => auth.break(new Error('Disconnected')))
+    await React.act(async () => auth.proof.resolve(profile))
+    await React.act(async () => auth.break(new Error('Disconnected')))
     expect(state!.authenticatedApi).toBeNull()
     expect(state!.error).toBe('Disconnected')
     expect(auth.dispose).toHaveBeenCalledOnce()
@@ -112,8 +112,8 @@ describe('native authentication admission', () => {
     await render(publicRoot.api, nativeConfig)
     expect(publicRoot.methods.authenticate).toHaveBeenCalledWith('native-token')
     expect(publicRoot.methods.authenticateExternal).not.toHaveBeenCalled()
-    await act(async () => auth.proof.resolve(profile))
-    await act(async () => state!.logout())
+    await React.act(async () => auth.proof.resolve(profile))
+    await React.act(async () => state!.logout())
     expect(state!.isAuthenticated).toBe(false)
     expect(localStorage.getItem('authToken')).toBeNull()
     expect(auth.dispose).toHaveBeenCalledOnce()
@@ -122,10 +122,10 @@ describe('native authentication admission', () => {
     const auth = session(), publicRoot = publicApi(auth.api)
     await render(publicRoot.api, nativeConfig)
     expect(state!.isLoading).toBe(false)
-    await act(async () => state!.login('new-token'))
+    await React.act(async () => state!.login('new-token'))
     expect(publicRoot.methods.authenticate).toHaveBeenCalledWith('new-token')
     await render(publicRoot.api)
-    await act(async () => state!.login('forged-fallback'))
+    await React.act(async () => state!.login('forged-fallback'))
     expect(publicRoot.methods.authenticate).toHaveBeenCalledTimes(1)
   })
   it('surfaces configuration failure without attempting token fallback', async () => {
@@ -146,7 +146,7 @@ describe('native authentication admission', () => {
   it('limits host sign-out navigation to the current origin', () => {
     expect(externalLogoutUrl('/sign-out', 'https://platform.example')).toBe('https://platform.example/sign-out')
     for (const value of ['//other.example/sign-out', 'javascript:alert(1)', 'https://user:pass@platform.example/sign-out']) {
-      expect(() => externalLogoutUrl(value, 'https://platform.example')).toThrow()
+      expect(() => externalLogoutUrl(value, 'https://platform.example')).toThrow('External sign-out must use this origin.')
     }
   })
 })

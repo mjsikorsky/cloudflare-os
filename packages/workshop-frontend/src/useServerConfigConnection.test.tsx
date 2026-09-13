@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from 'react'
+import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { expect, it } from 'vitest'
 import type { RpcStub } from 'capnweb'
@@ -18,17 +18,17 @@ it('never uses stale configuration or a late reply for a replacement RPC root', 
   function View({ owner }: { owner: RpcStub<PublicApi> }) { state = useServerConfigConnection(owner); return null }
   const container = document.createElement('div'), root = createRoot(container)
   try {
-    await act(async () => root.render(<View owner={first.owner} />))
-    await act(async () => root.render(<View owner={second.owner} />))
-    await act(async () => first.resolve({ externalAuthentication: { logoutUrl: '/wrong-session' } } as ServerConfig))
+    await React.act(async () => root.render(<View owner={first.owner} />))
+    await React.act(async () => root.render(<View owner={second.owner} />))
+    await React.act(async () => first.resolve({ externalAuthentication: { logoutUrl: '/wrong-session' } } as ServerConfig))
     expect(state.config).toBeNull()
     const currentConfig = { siteName: 'Current native server' } as ServerConfig
-    await act(async () => second.resolve(currentConfig))
+    await React.act(async () => second.resolve(currentConfig))
     expect(state.config).toBe(currentConfig)
-    await act(async () => root.render(<View owner={third.owner} />))
+    await React.act(async () => root.render(<View owner={third.owner} />))
     expect(state.config).toBeNull()
-    await act(async () => third.reject(new Error('Disconnected')))
+    await React.act(async () => third.reject(new Error('Disconnected')))
     expect(state.config).toBeNull()
     expect(state.error).toBe(true)
-  } finally { await act(async () => root.unmount()); container.remove() }
+  } finally { await React.act(async () => root.unmount()); container.remove() }
 })

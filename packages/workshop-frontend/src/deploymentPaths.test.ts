@@ -8,9 +8,9 @@ describe('native deployment routes', () => {
     const paths = ['/', '/workspaces', '/workspace/id?chat=0&w=0#share=key', '/blueprint/id', '/gatekeepers/context']
     for (const path of paths) expect(workshopPath(path, base)).toBe(mount + path)
   })
-  it('matches a whole path segment and rejects origin-changing mounts and links', () => {
-    for (const base of ['https://other.test/', '//other.test/', '/workshop?query']) expect(() => basePath(base)).toThrow()
-    for (const path of ['https://other.test/', '//other.test/', 'workspace/id']) expect(() => workshopPath(path, '/workshop/')).toThrow()
+  it('rejects origin-changing mounts and links', () => {
+    for (const base of ['https://other.test/', '//other.test/', '/workshop?query']) expect(() => basePath(base)).toThrow("The Workshop base URL must be an absolute path on this origin.")
+    for (const path of ['https://other.test/', '//other.test/', 'workspace/id']) expect(() => workshopPath(path, '/workshop/')).toThrow('Expected a native Workshop route.')
   })
 })
 

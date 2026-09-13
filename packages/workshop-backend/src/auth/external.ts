@@ -16,7 +16,7 @@ export interface ExternalIdentity {
 /** Validate and snapshot a host admission before exposing any RPC capability. */
 export function validateExternalIdentity(
     identity: ExternalIdentity, requestUrl: string, now = Date.now()): Readonly<ExternalIdentity> {
-  if (!identity || typeof identity.id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9@._+\-]{0,255}$/.test(identity.id)
+  if (!identity || typeof identity.id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9@._+-]{0,255}$/.test(identity.id)
       || typeof identity.logoutUrl !== "string" || !identity.logoutUrl.trim()
       || typeof identity.name !== "string" || !identity.name.trim() || identity.name.length > 200
       || !Number.isSafeInteger(identity.expiresAt) || identity.expiresAt <= now
