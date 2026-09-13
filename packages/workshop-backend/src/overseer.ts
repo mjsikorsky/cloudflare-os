@@ -1,6 +1,7 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
+import type { ContributionAuthor, ContributionInfo, ContributionObservation, WorkspaceContribution } from "@gadgets/workshop-shared/api";
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, AGENT_CATALOG_MAX_ENTRIES, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -7104,9 +7105,29 @@ function joinSessionPresence(
   };
 }
 
+type ContributionOperations = Pick<WorkspaceContribution,
+    "getInfo" | "observe" | "createGadget" | "proposeCode" | "finalizeDraft">;
+
+@validateRpc()
+class WorkspaceContributionImpl extends RpcTarget implements WorkspaceContribution {
+  #operations: ContributionOperations;
+  #disposed = false;
+  constructor(operations: ContributionOperations) { super(); this.#operations = operations; }
+  [Symbol.dispose]() { this.#disposed = true; }
+  #check() { if (this.#disposed) throw new Error("Workspace contribution access ended."); }
+  async getInfo(): Promise<ContributionInfo> { this.#check(); return this.#operations.getInfo(); }
+  async observe(): Promise<ContributionObservation> { this.#check(); return this.#operations.observe(); }
+  async createGadget(title: string, bindingName: string): Promise<WorkpieceSummary> {
+    this.#check(); return this.#operations.createGadget(title, bindingName);
+  }
+  async proposeCode(update: Uint8Array): Promise<void> { this.#check(); return this.#operations.proposeCode(update); }
+  async finalizeDraft(): Promise<void> { this.#check(); return this.#operations.finalizeDraft(); }
+}
+
 @validateRpc()
 class OverseerClientInterface extends RpcTarget implements Overseer {
   #clientProfilePromise: Promise<AiChatAuthorInfo> | undefined;
+  #disposed = false;
 
   constructor(private impl: OverseerImpl,
               private owner: DurableObjectStub<UserDurableObject>,
@@ -7128,6 +7149,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   #leaveOutputsFanout: () => void;
 
   [Symbol.dispose]() {
+    this.#disposed = true;
     this.#leavePresence();
     this.#leaveOutputsFanout();
     this.notifyClosed();
@@ -7149,6 +7171,57 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     const profilePromise = this.#clientProfilePromise!;
     return profilePromise;
+  }
+
+  async createContribution(chatId: number, descriptor: ContributionAuthor)
+      : Promise<RpcStub<WorkspaceContribution>> {
+    if (!descriptor || typeof descriptor.id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(descriptor.id)
+        || typeof descriptor.name !== "string" || !descriptor.name.trim() || descriptor.name.length > 200) {
+      throw new Error("Invalid contribution author.");
+    }
+    const author: AiChatAuthorInfo = Object.freeze({type: "agent", id: descriptor.id, name: descriptor.name});
+    const check = () => {
+      if (this.#disposed || !this.impl.ownerId) throw new Error("Workspace contribution access ended.");
+      this.impl.assertChatNotActive(chatId);
+    };
+    check();
+    const summarize = (record: GadgetRecord): WorkpieceSummary => ({
+      id: record.id, type: "gadget", title: record.title, filesRoot: this.impl.gadgetRootName(record.id),
+      ...(record.output ? {output: record.output} : {}),
+      ...(record.pending ? {chatId: record.pending.chatId} : {}),
+    });
+    const observe = (): ContributionObservation => {
+      check();
+      const {ydoc, version} = this.impl.buildYDoc("current");
+      try {
+        for (const change of this.impl.getProposedChanges(chatId)) if (change.update) Y.applyUpdateV2(ydoc, change.update);
+        for (const draft of this.impl.listChatDraftUpdates(chatId)) Y.applyUpdateV2(ydoc, draft.update);
+        return {codeVersion: version, update: Y.encodeStateAsUpdateV2(ydoc),
+          workpieces: [...this.impl.storage.gadgets.list()]
+              .filter(record => !record.pending || record.pending.chatId === chatId).map(summarize)};
+      } finally { ydoc.destroy(); }
+    };
+    // The child retains ordinary JS closures, not a duplicated parent RPC stub. Releasing
+    // the parent therefore invalidates the child even if another runtime still holds it.
+    const operations: ContributionOperations = {
+      getInfo: async () => { check(); return {workspaceId: this.impl.ctx.id.toString(), chatId, author}; },
+      observe: async () => observe(),
+      createGadget: async (title, bindingName) => {
+        check();
+        if (typeof bindingName !== "string") throw new Error("A contribution binding name is required.");
+        const record = await this.#createGadgetRecord(title, chatId, bindingName, author, check);
+        return summarize(record);
+      },
+      proposeCode: async update => {
+        check();
+        // Reject malformed source updates before persisting a poisoned native draft.
+        const doc = new Y.Doc();
+        try { Y.applyUpdateV2(doc, update); } finally { doc.destroy(); }
+        this.#recordChatDraft(update, chatId, author);
+      },
+      finalizeDraft: async () => { check(); this.impl.materializeChatDraft(chatId, this.impl.assertChatNotActive(chatId)); },
+    };
+    return new RpcStub<WorkspaceContribution>(new WorkspaceContributionImpl(operations));
   }
 
   async getMetadata(): Promise<GadgetMetadata> {
@@ -7245,6 +7318,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async createGadget(title: string, chatId?: number, bindingName?: string)
       : Promise<RpcStub<GadgetClient>> {
+    const record = await this.#createGadgetRecord(title, chatId, bindingName);
+    // @ts-expect-error An RpcTarget implementing the interface works in place of a stub.
+    return new GadgetClientImpl(this.impl, record.id, this.clientUser);
+  }
+
+  async #createGadgetRecord(title: string, chatId?: number, bindingName?: string,
+      contributionAuthor?: AiChatAuthorInfo, checkContribution?: () => void): Promise<GadgetRecord> {
     // When creating within a chat, names already claimed in that chat's scope (its frozen seed
     // plus log-derived bindings) are off-limits too: the chat's binding map is keyed by name,
     // so on replay the existing binding would win and the new gadget would never be addressable
@@ -7283,7 +7363,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       // the gadget pending. Both writes happen in one synchronous step, so (unlike the agent's
       // createGadget tool, whose "changes" message is persisted at step end) this path has no
       // crash window at all.
-      let author = await this.#getClientProfile();
+      let author = contributionAuthor ?? await this.#getClientProfile();
+      checkContribution?.();
       if (!this.impl.storage.chatMeta.get(chatId)) {
         // Re-check adjacent to the synchronous creation: the chat may have been deleted during
         // the awaits above, and a pending record for a deleted chat would never be reaped.
@@ -7295,9 +7376,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         createdGadgets: [{gadgetId: record.id, title: record.title, bindingName}],
       }]);
     }
-    // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
-    //     type system doesn't know this.
-    return new GadgetClientImpl(this.impl, record.id, this.clientUser);
+    return record;
   }
 
   async getGadget(id: WorkpieceId): Promise<RpcStub<GadgetClient>> {
@@ -7387,6 +7466,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
 
     let author = await this.#getClientProfile();
+    this.#recordChatDraft(update, chatId, author);
+  }
+
+  #recordChatDraft(update: Uint8Array, chatId: number, author: AiChatAuthorInfo): void {
     let meta = this.impl.getChatMetaOrThrow(chatId);
 
     // Decide if we want to materialize existing drafts due to changing users. If two users are
@@ -8866,6 +8949,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // --- Denied methods (build-only) ---
 
   async setTitle(_title: string): Promise<void> { this.#deny(); }
+  async createContribution(_chatId: number, _author: ContributionAuthor)
+      : Promise<RpcStub<WorkspaceContribution>> { this.#deny(); }
   async setPinned(_pinned: boolean): Promise<void> { this.#deny(); }
   async deleteSelf(): Promise<void> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }

@@ -1299,7 +1299,56 @@ export type AgentSpawnerConfig = {
 // workspace. Workspace-level concerns live here: the gadget registry, code sync (one Yjs doc for
 // the whole workspace), chats, actions/hooks, sharing, and blueprint listing. Per-gadget
 // operations live on the GadgetClient sub-capability (see createGadget()/getGadget()).
+/** Display attribution for an external agent delegated by an authorized workspace user.
+ * This descriptor conveys no identity, membership, billing or acceptance authority.
+ */
+export type ContributionAuthor = Pick<AiChatAuthorInfo, "id" | "name">;
+
+/** Stable native references and explicit agent attribution for a delegated contribution. */
+export type ContributionInfo = {
+  /** Native workspace Durable Object ID. */
+  workspaceId: string;
+  /** Native chat to which all proposals belong. */
+  chatId: number;
+  /** Agent attribution chosen when the capability was minted. */
+  author: AiChatAuthorInfo;
+};
+
+/** Authorized source view: mainline plus the bound chat's pending changes and live draft. */
+export type ContributionObservation = {
+  /** Native mainline code revision underlying this observation. */
+  codeVersion: number;
+  /** Yjs V2 state update for the authorized workspace source view. */
+  update: Uint8Array;
+  /** Gadget workpieces visible to this chat, including its own provisional creations. */
+  workpieces: WorkpieceSummary[];
+};
+
+/** A proposal-only capability bound to one already-authorized workspace session and chat.
+ * It cannot approve actions, accept/revert proposals, write mainline code, execute gadgets,
+ * obtain connected-account capabilities, or choose another workspace/chat. Native access
+ * revocation, parent-session disposal and chat deletion invalidate it. Its holder must dispose it.
+ */
+export interface WorkspaceContribution extends RpcTarget {
+  /** Return the immutable native destination and external-agent attribution. */
+  getInfo(): Promise<ContributionInfo>;
+  /** Observe native source and workpiece metadata without exposing runtime capabilities. */
+  observe(): Promise<ContributionObservation>;
+  /** Create a provisional gadget in the bound chat. Explicit naming avoids model invocation. */
+  createGadget(title: string, bindingName: string): Promise<WorkpieceSummary>;
+  /** Append a Yjs V2 live draft attributed to this agent, never to committed mainline. */
+  proposeCode(update: Uint8Array): Promise<void>;
+  /** Materialize this chat's live draft as native proposed changes without accepting them. */
+  finalizeDraft(): Promise<void>;
+}
+
 export interface Overseer extends RpcTarget {
+  /** Delegate observation and proposals for an existing chat to an external agent.
+   * Requires an already-open build-capable workspace, including its observer verification.
+   * The returned capability retains this session's lifetime and cannot widen its authority.
+   */
+  createContribution(chatId: number, author: ContributionAuthor): Promise<RpcStub<WorkspaceContribution>>;
+
   // Get metadata describing this workspace.
   getMetadata(): Promise<GadgetMetadata>;
 

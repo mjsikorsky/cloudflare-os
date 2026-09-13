@@ -3,6 +3,7 @@ import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment
 import { AgentCatalog, ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
 import { createWorkshopLogger } from "./observability";
 import * as Y from "yjs";
+import { applyWorkspaceFileEdit as applyPendingEditToYdoc, type WorkspaceFileEdit as ReplayPendingEdit } from "@gadgets/workshop-shared/workspace-code";
 import { Type } from "@earendil-works/pi-ai";
 import type {
   AssistantMessage, ImageContent, Message, TSchema, TextContent, ThinkingContent, ToolCall,
@@ -645,60 +646,6 @@ type CodePreviewEntry = {
     fieldLength: number;  // how much of the streaming field has been applied
   };
 };
-
-// Description of a file-editing tool call which we may need to replay. `rootName` names the
-// Y.Doc root map holding the target workpiece's files.
-type ReplayPendingEdit = {
-  toolName: "writeFile";
-  rootName: string;
-  filename: string;
-  content: string;
-} | {
-  toolName: "editFile";
-  rootName: string;
-  filename: string;
-  textToReplace: string;
-  replacement: string;
-};
-
-// Apply pending edit to a Y.Doc.
-function applyPendingEditToYdoc(ydoc: Y.Doc, edit: ReplayPendingEdit) {
-  switch (edit.toolName) {
-    case "writeFile":
-      ydoc.transact(tr => {
-        let txt = new Y.Text();
-        txt.insert(0, edit.content);
-        ydoc.getMap<Y.Text>(edit.rootName).set(edit.filename, txt);
-      });
-      break;
-
-    case "editFile": {
-      let text = ydoc.getMap<Y.Text>(edit.rootName).get(edit.filename);
-      if (!text) {
-        throw new Error("File does not exist.");
-      }
-
-      let content = text.toString();
-      let pos = content.indexOf(edit.textToReplace);
-      if (pos < 0) {
-        throw new Error("No matching text was found in the file.");
-      }
-      if (content.indexOf(edit.textToReplace, pos + 1) >= 0) {
-        throw new Error("Multiple matches were found. The text to match must be unique.");
-      }
-
-      ydoc.transact(tr => {
-        text.delete(pos, edit.textToReplace.length);
-        text.insert(pos, edit.replacement);
-      });
-      break;
-    }
-
-    default:
-      edit satisfies never;
-      throw new Error("Unknown edit.");
-  }
-}
 
 // Apply pending edit to file content as a string.
 //
