@@ -34,7 +34,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   const id = params.id ?? ''
   const navigate = useNavigate()
   const router = useRouter()
-  const { isAuthenticated, authenticatedApi, isLoading: authLoading, login } = useAuth(rpcStub)
+  const { isAuthenticated, authenticatedApi, isLoading: authLoading, login, signIn } = useAuth(rpcStub)
   const toasts = useKumoToastManager()
 
   const [blueprint, setBlueprint] = useState<BlueprintPublicInfo | null>(null)
@@ -481,9 +481,14 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     })
   }, [blueprint, isAuthenticated, findMatchingAccounts, findSuggestedModelId])
 
+  // A host visitor signs in on the host's page; native deployments show the login form here.
+  const requestLogin = () => {
+    if (!signIn()) setShowLogin(true)
+  }
+
   const handleStartConfigure = () => {
     if (!isAuthenticated) {
-      setShowLogin(true)
+      requestLogin()
       return
     }
 
@@ -634,7 +639,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     if (!id) return
 
     if (!isAuthenticated || !authenticatedApi) {
-      setShowLogin(true)
+      requestLogin()
       return
     }
 
@@ -660,7 +665,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     if (!id) return
 
     if (!isAuthenticated || !authenticatedApi) {
-      setShowLogin(true)
+      requestLogin()
       return
     }
 
@@ -985,7 +990,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                     assignment={draftAssignments[name]}
                     vendor={binding.type === 'gatekeeper' ? vendorById.get(binding.gatekeeperName.toLowerCase()) : undefined}
                     models={models}
-                    onConfigure={() => isAuthenticated ? openBindingConfigurator(name) : setShowLogin(true)}
+                    onConfigure={() => isAuthenticated ? openBindingConfigurator(name) : requestLogin()}
                   />
                 ))}
               </div>

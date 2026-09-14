@@ -26,7 +26,8 @@ import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
-import { validateExternalIdentity, type ExternalIdentity } from "./auth/external.js";
+import { validateExternalIdentity, validateExternalVisitor,
+    type ExternalIdentity, type ExternalVisitor } from "./auth/external.js";
 import { ExternalAdmissionSeat, type ExternalConnectionAuthority } from "./auth/external-seat.js";
 import { validateExternalContribution, type ExternalContributionTarget } from "./auth/external-contribution.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
@@ -631,16 +632,20 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   constructor(private ctx: ExecutionContext, private env: Env,
       private abortSession: (reason: Error) => void,
       private accessPayload?: JWTPayload,
-      private externalIdentity?: ExternalAdmissionSeat) {
+      private externalIdentity?: ExternalAdmissionSeat,
+      private externalVisitor?: Readonly<ExternalVisitor>) {
     super();
     this.users = this.ctx.exports.UserDurableObject;
   }
 
   #requireNativeAuthentication(): void {
-    if (this.externalIdentity) throw new Error("This connection uses host authentication.");
+    if (this.externalIdentity || this.externalVisitor) {
+      throw new Error("This connection uses host authentication.");
+    }
   }
 
   async authenticateExternal(): Promise<AuthenticatedApi> {
+    if (this.externalVisitor) throw new Error("Sign in through the host to continue.");
     const identity = this.externalIdentity?.current();
     if (!identity || identity.expiresAt <= Date.now()) {
       throw new Error("No current external identity admission.");
@@ -654,8 +659,16 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
   async getServerConfig(): Promise<ServerConfig> {
     const config = await getServerConfig(this.env);
-    return this.externalIdentity ? {...config, passwordAuthEnabled: false, authVendors: [],
-      externalAuthentication: {logoutUrl: this.externalIdentity.current().logoutUrl}} : config;
+    if (this.externalIdentity) {
+      return {...config, passwordAuthEnabled: false, authVendors: [],
+        externalAuthentication: {logoutUrl: this.externalIdentity.current().logoutUrl}};
+    }
+    if (this.externalVisitor) {
+      return {...config, passwordAuthEnabled: false, authVendors: [],
+        externalAuthentication: {logoutUrl: this.externalVisitor.logoutUrl,
+          loginUrl: this.externalVisitor.loginUrl}};
+    }
+    return config;
   }
 
   async startGatekeeperLogin(vendorId: string): Promise<{ url: string; attempt: RpcStub<LoginAttempt> }> {
@@ -819,6 +832,16 @@ export async function fetchWithIdentity(
   return handleRequest(req, env, ctx, admission, authority);
 }
 
+/** Serve a signed-out visitor admitted by an embedding host to the public surface: deployment
+ * configuration and public blueprints. No account is reachable on this connection; every native
+ * sign-in method is refused and the UI is sent to the host's own sign-in page.
+ */
+export async function fetchAsVisitor(
+    req: Request, env: Env, ctx: ExecutionContext, visitor: ExternalVisitor): Promise<Response> {
+  const admission = validateExternalVisitor(visitor, req.url);
+  return handleRequest(req, env, ctx, undefined, undefined, undefined, admission);
+}
+
 /** Serve only the existing proposal capability for an exact host-authorized execution.
  * Account and workspace parents stay inside this native server; clients cannot select another
  * resource, change identity or access the full account API through this connection.
@@ -837,7 +860,8 @@ export async function fetchWithContribution(req: Request, env: Env, ctx: Executi
 
 async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
     externalIdentity?: Readonly<ExternalIdentity>, authority?: ExternalConnectionAuthority,
-    externalContribution?: Readonly<ExternalContributionTarget>): Promise<Response> {
+    externalContribution?: Readonly<ExternalContributionTarget>,
+    externalVisitor?: Readonly<ExternalVisitor>): Promise<Response> {
     let url = new URL(req.url);
 
     if (url.pathname === SITE_LOGO_PATH) {
@@ -861,7 +885,7 @@ async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
     if (url.pathname === "/api") {
       // A bounded host admission belongs to one live transport. HTTP batches have no retained
       // server endpoint to revoke; they must use a separately designed authorization mechanism.
-      if (externalIdentity && req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+      if ((externalIdentity || externalVisitor) && req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
         return new Response("Host-authenticated RPC requires WebSocket.", {status: 426});
       }
       // Make sure the bundled format blueprints are installed. The AdminSettings DO doesn't wake
@@ -889,7 +913,7 @@ async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
 
       let accessPayload: JWTPayload | undefined;
 
-      if ((externalIdentity || env.CF_ACCESS_AUD) && req.headers.get("Origin") !== url.origin) {
+      if ((externalIdentity || externalVisitor || env.CF_ACCESS_AUD) && req.headers.get("Origin") !== url.origin) {
         return new Response("Cross-origin API access not allowed.", {status: 403});
       }
 
@@ -922,7 +946,7 @@ async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
         }
       };
 
-      const api = new PublicApiImpl(ctx, env, abortSession, accessPayload);
+      const api = new PublicApiImpl(ctx, env, abortSession, accessPayload, undefined, externalVisitor);
       if (externalIdentity) {
         seat = new ExternalAdmissionSeat(externalIdentity, req.url,
             () => abortSession(new Error("Host admission ended.")), authority);

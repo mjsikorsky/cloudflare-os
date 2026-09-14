@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { PublicApi, AuthenticatedApi, ServerConfig } from '@gadgets/workshop-shared/api'
 import { useServerConfig, useServerConfigError } from './ServerConfigContext'
-import { externalLogoutUrl } from './deploymentPaths'
+import { externalLogoutUrl, externalLoginUrl } from './deploymentPaths'
 
 const CF_ACCESS_MODE = import.meta.env.VITE_CF_ACCESS_MODE === 'true'
 export { CF_ACCESS_MODE }
@@ -28,6 +28,9 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   const configError = useServerConfigError()
   const logoutUrl = config?.externalAuthentication?.logoutUrl
   const externallyManaged = logoutUrl !== undefined || CF_ACCESS_MODE
+  // A host visitor connection carries no identity to prove; the host signs people in itself.
+  const loginUrl = config?.externalAuthentication?.loginUrl
+  const visitor = loginUrl !== undefined
   const [authState, setAuthState] = useState<AuthState>(INITIAL_AUTH)
   const currentAttempt = useRef<AuthAttempt | null>(null)
 
@@ -72,13 +75,21 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     discardAttempt()
     if (!config || configError) return
     const token = externallyManaged ? null : localStorage.getItem('authToken')
-    if (externallyManaged || token) authenticate(token)
+    if (externallyManaged ? !visitor : token) authenticate(token)
     else setAuthState({ ...INITIAL_AUTH, owner: publicApi, config, isLoading: false })
     return discardAttempt
   }, [publicApi, config, configError])
 
   const login = (token: string) => {
     if (!externallyManaged) authenticate(token)
+  }
+  // Leave for the host's sign-in page; it returns the person to the current location.
+  const signIn = () => {
+    if (loginUrl === undefined) return false
+    const url = externalLoginUrl(loginUrl, window.location.origin, window.location.href)
+    const host = window.top ?? window
+    host.location.assign(url)
+    return true
   }
   const logout = () => {
     if (logoutUrl !== undefined) {
@@ -107,7 +118,7 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     authenticatedApi,
     isLoading: !configError && (!current || authState.isLoading),
     error: configError ? 'The server authentication configuration could not be loaded.' : current ? authState.error : null,
-    externallyManaged, login, logout,
+    externallyManaged, visitor, login, signIn, logout,
     isAuthenticated: !!authenticatedApi,
   }
 }

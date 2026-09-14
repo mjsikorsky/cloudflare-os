@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { PublicApi, AuthenticatedApi, ServerConfig, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { useAuth } from './useAuth'
-import { externalLogoutUrl } from './deploymentPaths'
+import { externalLogoutUrl, externalLoginUrl } from './deploymentPaths'
 
 const fixture = vi.hoisted(() => ({ config: null as ServerConfig | null, error: false }))
 vi.mock('./ServerConfigContext', () => ({ useServerConfig: () => fixture.config, useServerConfigError: () => fixture.error }))
@@ -15,6 +15,7 @@ const tokens = new Map<string, string>()
 vi.stubGlobal('localStorage', { getItem: (key: string) => tokens.get(key) ?? null, setItem: (key: string, value: string) => tokens.set(key, value), removeItem: (key: string) => tokens.delete(key), clear: () => tokens.clear() })
 const nativeConfig = { passwordAuthEnabled: true } as ServerConfig
 const externalConfig = { ...nativeConfig, externalAuthentication: { logoutUrl: '/sign-out' } }
+const visitorConfig = { ...nativeConfig, externalAuthentication: { logoutUrl: '/sign-out', loginUrl: '/login' } }
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (error: Error) => void
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
@@ -142,6 +143,29 @@ describe('native authentication admission', () => {
     expect(publicRoot.methods.authenticateExternal).not.toHaveBeenCalled()
     expect(state!.isLoading).toBe(false)
     expect(state!.error).toContain('this origin')
+  })
+  it('settles a host visitor as signed out without proving an identity, and leaves sign-in to the host', async () => {
+    const auth = session(), publicRoot = publicApi(auth.api)
+    localStorage.setItem('authToken', 'old-native-token')
+    await render(publicRoot.api, visitorConfig)
+    expect(publicRoot.methods.authenticateExternal).not.toHaveBeenCalled()
+    expect(publicRoot.methods.authenticate).not.toHaveBeenCalled()
+    expect(state!.isLoading).toBe(false)
+    expect(state!.isAuthenticated).toBe(false)
+    expect(state!.externallyManaged).toBe(true)
+    expect(state!.visitor).toBe(true)
+    await React.act(async () => state!.login('forged-fallback'))
+    expect(publicRoot.methods.authenticate).not.toHaveBeenCalled()
+    await render(publicRoot.api, nativeConfig)
+    expect(state!.visitor).toBe(false)
+    expect(state!.signIn()).toBe(false)
+  })
+  it('limits host sign-in navigation to the current origin and carries the return location', () => {
+    expect(externalLoginUrl('/login', 'https://platform.example', 'https://platform.example/workshop/blueprint/abc'))
+      .toBe('https://platform.example/login?redirect_url=https%3A%2F%2Fplatform.example%2Fworkshop%2Fblueprint%2Fabc')
+    for (const value of ['//other.example/login', 'javascript:alert(1)', 'https://user:pass@platform.example/login']) {
+      expect(() => externalLoginUrl(value, 'https://platform.example', 'https://platform.example/')).toThrow('External sign-in must use this origin.')
+    }
   })
   it('limits host sign-out navigation to the current origin', () => {
     expect(externalLogoutUrl('/sign-out', 'https://platform.example')).toBe('https://platform.example/sign-out')

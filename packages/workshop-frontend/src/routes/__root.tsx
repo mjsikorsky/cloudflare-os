@@ -29,7 +29,7 @@ function ConnectionLostBanner() {
 function RootComponent() {
   const rpcStub = useRpcStub()
   const connectionLost = useConnectionLost()
-  const { isAuthenticated, authenticatedApi, isLoading, error, logout, login, externallyManaged } = useAuth(rpcStub)
+  const { isAuthenticated, authenticatedApi, isLoading, error, logout, login, signIn, externallyManaged, visitor } = useAuth(rpcStub)
   const pathname = useRouterState({ select: (s) => s.location.pathname })
 
   // When authenticatedApi becomes available, the connection is proven alive.
@@ -50,6 +50,11 @@ function RootComponent() {
   // The workspace editor renders fullscreen (no app chrome). /gadget/ is the legacy URL, kept
   // here so the chrome doesn't flash in during the redirect to /workspace/.
   const isWorkspaceEditor = pathname.startsWith('/workspace/') || pathname.startsWith('/gadget/')
+
+  // A host visitor who reaches a route beyond the public surface signs in on the host's page.
+  useEffect(() => {
+    if (visitor && !isLoading && !isAuthenticated && !standalone) signIn()
+  }, [visitor, isLoading, isAuthenticated, standalone])
 
   const handleLoginSuccess = () => {
     const token = localStorage.getItem('authToken')
@@ -89,7 +94,7 @@ function RootComponent() {
     return (
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
         <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm text-kumo-subtle">Authenticating...</p>
+        <p className="text-sm text-kumo-subtle">{visitor ? 'Taking you to sign in...' : 'Authenticating...'}</p>
       </div>
     )
   }

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { newWebSocketRpcSession } from "capnweb";
 import type { PublicApi } from "@gadgets/workshop-shared/api";
-import nativeServer, { fetchWithIdentity } from "../src/server";
+import nativeServer, { fetchWithIdentity, fetchAsVisitor } from "../src/server";
 
 // Real workerd WebSocketPair and Cap'n Web serialization; only the account/config
 // persistence boundary is a fixture. This does not prove Clerk or UserDO tenancy.
@@ -192,6 +192,42 @@ describe("host admission on native workerd RPC transport", () => {
     const f = fixture();
     await expect(fetchWithIdentity(request(), f.env, f.ctx, admission(-1))).rejects.toThrow("Invalid external identity");
     expect(f.authenticateExternal).not.toHaveBeenCalled();
+  });
+
+  it("admits a host visitor to the public surface only and sends sign-in to the host", async () => {
+    const f = fixture();
+    const visitor = {loginUrl: "/login", logoutUrl: "/sign-out"};
+    expect((await fetchAsVisitor(request("POST"), f.env, f.ctx, visitor)).status).toBe(426);
+    expect((await fetchAsVisitor(request("GET", "https://attacker.example"), f.env, f.ctx, visitor)).status).toBe(403);
+    await expect(fetchAsVisitor(request(), f.env, f.ctx, {...visitor, loginUrl: "https://attacker.example/login"}))
+        .rejects.toThrow("host origin");
+    const response = await fetchAsVisitor(request(), f.env, f.ctx, visitor);
+    expect(response.status).toBe(101);
+    const socket = response.webSocket!;
+    socket.accept();
+    try {
+      using api = newWebSocketRpcSession<PublicApi>(socket);
+      const config = await api.getServerConfig();
+      expect(config.externalAuthentication).toEqual({logoutUrl: "/sign-out", loginUrl: "/login"});
+      expect(config.passwordAuthEnabled).toBe(false);
+      expect(config.authVendors).toEqual([]);
+      expect(await api.getBlueprint("missing")).toBeNull();
+    } finally {socket.close();}
+    // Every native sign-in method is refused; inspect the rejection frames on the wire.
+    const raw = (await fetchAsVisitor(request(), f.env, f.ctx, visitor)).webSocket!;
+    raw.accept();
+    try {
+      for (const [method, args, message] of [
+        ["authenticateExternal", [], "Sign in through the host to continue."],
+        ["authenticate", ["host-person-1:token"], "This connection uses host authentication."],
+        ["startGatekeeperLogin", ["github"], "This connection uses host authentication."],
+      ] as const) {
+        const frame = await rejectedCall(raw, method, [...args]);
+        expect(frame[0]).toBe("reject");
+        expect(frame[2]).toEqual(["error", "Error", message]);
+      }
+      expect(f.authenticateExternal).not.toHaveBeenCalled();
+    } finally {raw.close();}
   });
 
   it("does not treat identity headers as admission on the default native entry", async () => {

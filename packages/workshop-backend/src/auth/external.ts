@@ -13,6 +13,27 @@ export interface ExternalIdentity {
   logoutUrl: string;
 }
 
+/** A signed-out visitor admitted by a trusted embedding host to the public surface only
+ * (deployment configuration and public blueprints). There is no account behind this connection;
+ * the host signs people in on its own pages.
+ */
+export interface ExternalVisitor {
+  /** Same-origin host sign-in page, reached by a top-level navigation. */
+  loginUrl: string;
+  /** Same-origin host sign-out page, reached by a top-level navigation. */
+  logoutUrl: string;
+}
+
+/** A host page reference, kept as a path on the host origin. */
+function hostPath(value: unknown, requestUrl: string, what: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`Invalid external ${what} admission.`);
+  const url = new URL(value, requestUrl);
+  if (url.origin !== new URL(requestUrl).origin || url.username || url.password) {
+    throw new Error(`External ${what} must use the host origin.`);
+  }
+  return url.pathname + url.search + url.hash;
+}
+
 /** Validate and snapshot a host admission before exposing any RPC capability. */
 export function validateExternalIdentity(
     identity: ExternalIdentity, requestUrl: string, now = Date.now()): Readonly<ExternalIdentity> {
@@ -23,10 +44,14 @@ export function validateExternalIdentity(
       || identity.expiresAt > now + 300_000) {
     throw new Error("Invalid external identity admission.");
   }
-  const logout = new URL(identity.logoutUrl, requestUrl);
-  if (logout.origin !== new URL(requestUrl).origin || logout.username || logout.password) {
-    throw new Error("External sign-out must use the host origin.");
-  }
   return Object.freeze({ id: identity.id, name: identity.name,
-    expiresAt: identity.expiresAt, logoutUrl: logout.pathname + logout.search + logout.hash });
+    expiresAt: identity.expiresAt, logoutUrl: hostPath(identity.logoutUrl, requestUrl, "sign-out") });
+}
+
+/** Validate and snapshot a host visitor admission before exposing the public RPC surface. */
+export function validateExternalVisitor(
+    visitor: ExternalVisitor, requestUrl: string): Readonly<ExternalVisitor> {
+  if (!visitor || typeof visitor !== "object") throw new Error("Invalid external visitor admission.");
+  return Object.freeze({ loginUrl: hostPath(visitor.loginUrl, requestUrl, "sign-in"),
+    logoutUrl: hostPath(visitor.logoutUrl, requestUrl, "sign-out") });
 }

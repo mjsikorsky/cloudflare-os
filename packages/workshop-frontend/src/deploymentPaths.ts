@@ -22,3 +22,14 @@ export function externalLogoutUrl(value: string, origin: string): string {
   }
   return url.href
 }
+
+/** A host visitor signs in on the host's own page on this origin, then returns to `returnTo`
+ * (the current location, passed as `redirect_url`; the host limits it to its origin). */
+export function externalLoginUrl(value: string, origin: string, returnTo: string): string {
+  const url = new URL(value, origin)
+  if (url.origin !== origin || url.username || url.password) {
+    throw new Error('External sign-in must use this origin.')
+  }
+  url.searchParams.set('redirect_url', returnTo)
+  return url.href
+}
