@@ -26,6 +26,7 @@ import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
 import { validateExternalIdentity, type ExternalIdentity } from "./auth/external.js";
+import { ExternalAdmissionSeat, type ExternalConnectionAuthority } from "./auth/external-seat.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
@@ -628,7 +629,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   constructor(private ctx: ExecutionContext, private env: Env,
       private abortSession: (reason: Error) => void,
       private accessPayload?: JWTPayload,
-      private externalIdentity?: Readonly<ExternalIdentity>) {
+      private externalIdentity?: ExternalAdmissionSeat) {
     super();
     this.users = this.ctx.exports.UserDurableObject;
   }
@@ -638,21 +639,21 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async authenticateExternal(): Promise<AuthenticatedApi> {
-    const identity = this.externalIdentity;
+    const identity = this.externalIdentity?.current();
     if (!identity || identity.expiresAt <= Date.now()) {
       throw new Error("No current external identity admission.");
     }
     const user = this.users.get(this.users.idFromName(identity.id));
     await user.authenticateExternal(identity.id, identity.name,
         (await readAdminConfig(this.env)).signupsEnabled);
-    if (identity.expiresAt <= Date.now()) throw new Error("External identity admission expired.");
+    this.externalIdentity!.current();
     return new AuthenticatedApiImpl(this.ctx, this.env, user, this.abortSession);
   }
 
   async getServerConfig(): Promise<ServerConfig> {
     const config = await getServerConfig(this.env);
     return this.externalIdentity ? {...config, passwordAuthEnabled: false, authVendors: [],
-      externalAuthentication: {logoutUrl: this.externalIdentity.logoutUrl}} : config;
+      externalAuthentication: {logoutUrl: this.externalIdentity.current().logoutUrl}} : config;
   }
 
   async startGatekeeperLogin(vendorId: string): Promise<{ url: string; attempt: RpcStub<LoginAttempt> }> {
@@ -806,15 +807,18 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 /** Serve a request admitted by an embedding host. This is a server-side integration interface;
  * default HTTP handling never derives this authority from request headers or client arguments.
  * The host remains responsible for authenticating every request and its tenant/workspace access.
+ * Optional live authority is supplied by the trusted host in this isolate, never by RPC clients
+ * or serialized HTTP headers. Revalidation keeps the same native connection and account alive.
  */
 export async function fetchWithIdentity(
-    req: Request, env: Env, ctx: ExecutionContext, identity: ExternalIdentity): Promise<Response> {
+    req: Request, env: Env, ctx: ExecutionContext, identity: ExternalIdentity,
+    authority?: ExternalConnectionAuthority): Promise<Response> {
   const admission = validateExternalIdentity(identity, req.url);
-  return handleRequest(req, env, ctx, admission);
+  return handleRequest(req, env, ctx, admission, authority);
 }
 
 async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
-    externalIdentity?: Readonly<ExternalIdentity>): Promise<Response> {
+    externalIdentity?: Readonly<ExternalIdentity>, authority?: ExternalConnectionAuthority): Promise<Response> {
     let url = new URL(req.url);
 
     if (url.pathname === SITE_LOGO_PATH) {
@@ -886,21 +890,27 @@ async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
       let resp: Response | undefined;
       let hostSocket: WebSocket | undefined;
       let aborted = false;
+      let seat: ExternalAdmissionSeat | undefined;
       let abortSession = (reason: Error) => {
         aborted = true;
         if (hostSocket) hostSocket.close(1000, "Reconnect to verify access");
         else resp?.webSocket?.close();
       };
 
-      const api = new PublicApiImpl(ctx, env, abortSession, accessPayload, externalIdentity);
+      const api = new PublicApiImpl(ctx, env, abortSession, accessPayload);
       if (externalIdentity) {
+        seat = new ExternalAdmissionSeat(externalIdentity, req.url,
+            () => abortSession(new Error("Host admission ended.")), authority);
+        if (aborted) return new Response("Host authority ended.", {status: 403});
         const pair = new WebSocketPair();
         hostSocket = pair[0];
         hostSocket.accept();
-        newWebSocketRpcSession(hostSocket, api);
-        const timer = setTimeout(() => abortSession(new Error("Host admission expired.")),
-            Math.max(0, externalIdentity.expiresAt - Date.now()));
-        hostSocket.addEventListener("close", () => clearTimeout(timer), {once: true});
+        const hostApi = new PublicApiImpl(ctx, env, abortSession, accessPayload, seat);
+        const rpc = newWebSocketRpcSession(hostSocket, hostApi);
+        hostSocket.addEventListener("close", () => {
+          seat?.close();
+          rpc[Symbol.dispose]();
+        }, {once: true});
         resp = new Response(null, {status: 101, webSocket: pair[1]});
       } else {
         resp = await newWorkersRpcResponse(req, api);

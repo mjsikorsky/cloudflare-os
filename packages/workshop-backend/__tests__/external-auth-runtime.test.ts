@@ -52,6 +52,73 @@ function rejectedCall(socket: WebSocket, method: string, args: unknown[]) {
 }
 
 describe("host admission on native workerd RPC transport", () => {
+  it("refuses already-cancelled host authority before allocating a native transport", async () => {
+    const f = fixture();
+    const owner = new AbortController();
+    owner.abort();
+    const revalidate = vi.fn(async () => undefined);
+    const response = await fetchWithIdentity(request(), f.env, f.ctx, admission(), {
+      scope: "execution:person-1/workspace-a/session-1", signal: owner.signal, revalidate,
+    });
+    expect(response.status).toBe(403);
+    expect(response.webSocket).toBeNull();
+    expect(f.authenticateExternal).not.toHaveBeenCalled();
+    expect(revalidate).not.toHaveBeenCalled();
+  });
+
+  it("preserves the same held native RPC capability through finite renewals, then revokes it", async () => {
+    const f = fixture();
+    const owner = new AbortController();
+    let checks = 0;
+    const response = await fetchWithIdentity(request(), f.env, f.ctx, admission(400), {
+      scope: "execution:person-1/workspace-a/session-1", signal: owner.signal,
+      async revalidate(original, signal) {
+        signal.throwIfAborted();
+        checks++;
+        return {identity: {...original, expiresAt: Date.now() + 400},
+          scope: "execution:person-1/workspace-a/session-1"};
+      },
+    });
+    const socket = response.webSocket!;
+    socket.accept();
+    const ended = closed(socket);
+    using api = newWebSocketRpcSession<PublicApi>(socket);
+    using authenticated = await api.authenticateExternal();
+    expect((await authenticated.whoami()).id).toBe("host-person-1");
+    await new Promise(resolve => setTimeout(resolve, 950));
+    expect(checks).toBeGreaterThanOrEqual(3);
+    expect((await authenticated.whoami()).id).toBe("host-person-1");
+    expect(f.authenticateExternal).toHaveBeenCalledTimes(1);
+    owner.abort();
+    await ended;
+    await expect(Promise.resolve(authenticated.whoami())).rejects.toThrow();
+    expect(f.whoami).toHaveBeenCalledTimes(2);
+  });
+
+  it("a hung host renewal cannot retain an issued native capability beyond the old deadline", async () => {
+    const f = fixture();
+    const owner = new AbortController();
+    let pendingSignal: AbortSignal | undefined;
+    let release!: (value: undefined) => void;
+    const response = await fetchWithIdentity(request(), f.env, f.ctx, admission(400), {
+      scope: "execution:person-1/workspace-a/session-1", signal: owner.signal,
+      revalidate(_identity, signal) {
+        pendingSignal = signal;
+        return new Promise(resolve => {release = resolve;});
+      },
+    });
+    const socket = response.webSocket!;
+    socket.accept();
+    const ended = closed(socket);
+    using api = newWebSocketRpcSession<PublicApi>(socket);
+    using authenticated = await api.authenticateExternal();
+    expect((await authenticated.whoami()).id).toBe("host-person-1");
+    await ended;
+    expect(pendingSignal?.aborted).toBe(true);
+    release(undefined);
+    await expect(Promise.resolve(authenticated.whoami())).rejects.toThrow();
+  });
+
   it("revokes an already-issued authenticated capability at expiry", async () => {
     const f = fixture();
     const response = await fetchWithIdentity(request(), f.env, f.ctx, admission());
