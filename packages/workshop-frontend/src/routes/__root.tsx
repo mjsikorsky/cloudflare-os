@@ -42,9 +42,10 @@ function RootComponent() {
   const isBlueprint = pathname.startsWith('/blueprint/')
 
   // A standalone (no app shell) render is used only for signed-out visitors of public routes.
-  // Signed-in users get the full app chrome so public pages (esp. the blueprint detail) feel
-  // native — sidebar and all — instead of floating on a bare page.
-  const standalone = isSignup || (isBlueprint && !isAuthenticated)
+  // It waits for the auth verdict (and with it ServerConfig): rendering the public header
+  // earlier paints the default site name and mark, and a signed-in visitor would then see
+  // that header replaced by the full shell — sidebar and all — a moment later.
+  const standalone = isSignup || (isBlueprint && !isAuthenticated && !isLoading)
 
   // The workspace editor renders fullscreen (no app chrome). /gadget/ is the legacy URL, kept
   // here so the chrome doesn't flash in during the redirect to /workspace/.
