@@ -1,5 +1,6 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse, newWebSocketRpcSession } from "capnweb";
 import { validateRpc } from "capnweb-validate";
+import type { WorkspaceContribution } from "@gadgets/workshop-shared/api";
 import type { JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
@@ -27,6 +28,7 @@ import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
 import { validateExternalIdentity, type ExternalIdentity } from "./auth/external.js";
 import { ExternalAdmissionSeat, type ExternalConnectionAuthority } from "./auth/external-seat.js";
+import { validateExternalContribution, type ExternalContributionTarget } from "./auth/external-contribution.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
@@ -817,8 +819,25 @@ export async function fetchWithIdentity(
   return handleRequest(req, env, ctx, admission, authority);
 }
 
+/** Serve only the existing proposal capability for an exact host-authorized execution.
+ * Account and workspace parents stay inside this native server; clients cannot select another
+ * resource, change identity or access the full account API through this connection.
+ */
+export async function fetchWithContribution(req: Request, env: Env, ctx: ExecutionContext,
+    identity: ExternalIdentity, target: ExternalContributionTarget,
+    authority?: ExternalConnectionAuthority): Promise<Response> {
+  const url = new URL(req.url);
+  if (url.pathname !== "/api" || url.search || req.method !== "GET") {
+    return new Response("Not Found", {status: 404});
+  }
+  const admission = validateExternalIdentity(identity, req.url);
+  const contribution = validateExternalContribution(target);
+  return handleRequest(req, env, ctx, admission, authority, contribution);
+}
+
 async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
-    externalIdentity?: Readonly<ExternalIdentity>, authority?: ExternalConnectionAuthority): Promise<Response> {
+    externalIdentity?: Readonly<ExternalIdentity>, authority?: ExternalConnectionAuthority,
+    externalContribution?: Readonly<ExternalContributionTarget>): Promise<Response> {
     let url = new URL(req.url);
 
     if (url.pathname === SITE_LOGO_PATH) {
@@ -891,10 +910,16 @@ async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
       let hostSocket: WebSocket | undefined;
       let aborted = false;
       let seat: ExternalAdmissionSeat | undefined;
+      let releaseContributionParent: (() => void) | undefined;
       let abortSession = (reason: Error) => {
         aborted = true;
-        if (hostSocket) hostSocket.close(1000, "Reconnect to verify access");
-        else resp?.webSocket?.close();
+        try {
+          if (hostSocket) hostSocket.close(1000, "Reconnect to verify access");
+          else resp?.webSocket?.close();
+        } finally {
+          // Revoke the native parent immediately, not after a peer acknowledges close.
+          releaseContributionParent?.();
+        }
       };
 
       const api = new PublicApiImpl(ctx, env, abortSession, accessPayload);
@@ -902,16 +927,59 @@ async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
         seat = new ExternalAdmissionSeat(externalIdentity, req.url,
             () => abortSession(new Error("Host admission ended.")), authority);
         if (aborted) return new Response("Host authority ended.", {status: 403});
-        const pair = new WebSocketPair();
-        hostSocket = pair[0];
-        hostSocket.accept();
         const hostApi = new PublicApiImpl(ctx, env, abortSession, accessPayload, seat);
-        const rpc = newWebSocketRpcSession(hostSocket, hostApi);
-        hostSocket.addEventListener("close", () => {
-          seat?.close();
-          rpc[Symbol.dispose]();
-        }, {once: true});
-        resp = new Response(null, {status: 101, webSocket: pair[1]});
+        let parent: RpcStub<Overseer> | undefined;
+        let contribution: RpcStub<WorkspaceContribution> | undefined;
+        const releaseParent = () => {
+          const owned = parent;
+          parent = undefined;
+          owned?.[Symbol.dispose]();
+        };
+        if (externalContribution) releaseContributionParent = releaseParent;
+        const cancelSetup = () => seat?.close();
+        const checkSetup = () => {
+          req.signal.throwIfAborted();
+          seat!.current();
+          if (aborted) throw new Error("External contribution setup ended.");
+        };
+        try {
+          if (externalContribution) {
+            req.signal.addEventListener("abort", cancelSetup, {once: true});
+            checkSetup();
+            const account = await hostApi.authenticateExternal();
+            checkSetup();
+            // Retain each acquired capability before checking cancellation, so late native
+            // results are released even when the admission ended during the awaited call.
+            parent = await account.openGadget(externalContribution.workspaceId);
+            checkSetup();
+            contribution = await parent.createContribution(externalContribution.chatId, externalContribution.author);
+            checkSetup();
+          }
+          const pair = new WebSocketPair();
+          hostSocket = pair[0];
+          hostSocket.accept();
+          // Cap'n Web natively accepts a capability as the root. No proxy/method filter or
+          // parallel implementation of WorkspaceContribution is involved.
+          const rpc = newWebSocketRpcSession(hostSocket, contribution ?? hostApi);
+          contribution = undefined;  // Native RPC session now owns the exported root stub.
+          hostSocket.addEventListener("close", () => {
+            try { seat?.close(); }
+            finally {
+              try { releaseParent(); }
+              finally { rpc[Symbol.dispose](); }
+            }
+          }, {once: true});
+          resp = new Response(null, {status: 101, webSocket: pair[1]});
+        } catch {
+          try { contribution?.[Symbol.dispose](); }
+          finally {
+            try { releaseParent(); }
+            finally { seat.close(); }
+          }
+          return new Response("External contribution access denied.", {status: 403});
+        } finally {
+          req.signal.removeEventListener("abort", cancelSetup);
+        }
       } else {
         resp = await newWorkersRpcResponse(req, api);
       }

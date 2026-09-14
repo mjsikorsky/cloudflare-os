@@ -31,3 +31,35 @@ Every returned identity must preserve the original account, display name and sig
 Renewal preserves the same native transport and issued capability graph. It does not reconnect, create another account or grant new resource permissions. Existing native sharing, observer checks and parent-capability disposal still govern open work and contribution capabilities. The host must retain those parent capabilities for the authorized execution lifetime.
 
 A short handshake proof is not an execution grant. A longer execution may have a separate fixed, finite authorization ceiling and a live revocation signal; renewed native deadlines must never exceed that ceiling. The host's callback must check current authority and that ceiling, not repeatedly extend an expired browser proof. The host owns this issuer and current-membership integration; providing the native callback interface does not implement them.
+
+
+## Host machine contributions
+
+`fetchWithContribution(request, env, ctx, identity, target, authority?)` is a separate,
+server-local entry for a host-authorized execution. It accepts only an exact `GET /api`
+WebSocket request; normal origin checks still apply. The browser's `fetchWithIdentity`
+entry and full native account API are unchanged.
+
+The host supplies an immutable target `{workspaceId, chatId, author: {id, name}}` from
+verified execution authority. Derive the author from the current native agent session,
+never from a client RPC argument or a historical workspace locator's actor. No HTTP
+header is interpreted as this authority by the native server. The optional sixth
+argument is the same finite `ExternalConnectionAuthority` described above.
+
+The native server authenticates the admitted person, opens exactly that native workspace
+through its normal sharing/observer checks, and invokes the existing `createContribution`
+on its authorized parent. The existing `WorkspaceContribution` capability is the RPC root:
+observation and provisional proposals are available, but account discovery, arbitrary
+workspace opening, mainline writes, actions, acceptance and rejection are not. No wrapper
+implements or filters those RPC methods. The existing parent and chat lifecycle enforce
+native access and draft rules.
+
+The server retains the parent privately for the connection. Renewal preserves that same
+parent and contribution. Expiry, current-authority denial or native sharing revocation
+releases the parent immediately and closes the transport, without waiting for the peer
+close acknowledgement. Setup checks cancellation and expiry after each awaited native
+operation. A capability returned after cancellation is disposed before any upgrade.
+
+This entry does not implement a host grant issuer, runtime/session generation validation,
+organization ownership or model spending authorization. Those remain the respective
+host/native owners' responsibilities; knowing a workspace or chat identifier grants nothing.

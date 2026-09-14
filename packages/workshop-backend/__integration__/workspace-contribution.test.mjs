@@ -37,6 +37,35 @@ before(async () => {
     contents: ['esm', 'text'].includes(module.type) ? module.bytes.toString('utf8') : module.bytes,
   }));
   modules.sort((a, b) => Number(b.path === join(modulesRoot, bundle.mainModule)) - Number(a.path === join(modulesRoot, bundle.mainModule)));
+  // Fixture-only trusted host composition. Claims are selected by the Node test, not verified
+  // production credentials. Everything below this boundary is the actual native backend.
+  modules.unshift({type: 'ESModule', path: join(modulesRoot, 'fixture-entry.mjs'), contents: `
+    import server, {fetchWithContribution} from './${bundle.mainModule}';
+    export * from './${bundle.mainModule}';
+    const controls = new Map();
+    export default {async fetch(request, env, ctx) {
+      const url = new URL(request.url);
+      if (url.pathname === '/fixture-control') {
+        const state = controls.get(url.searchParams.get('key'));
+        if (url.searchParams.get('revoke') && state) state.allowed = false;
+        return Response.json({checks: state?.checks ?? 0});
+      }
+      if (url.pathname !== '/fixture-contribution') return server.fetch(request, env, ctx);
+      const key = request.headers.get('fixture-key');
+      const state = {checks: 0, allowed: true, controller: new AbortController()};
+      controls.set(key, state);
+      const target = JSON.parse(request.headers.get('fixture-target'));
+      const identity = {id: request.headers.get('fixture-person'), name: 'Host initial name',
+        expiresAt: Date.now() + 2000, logoutUrl: '/sign-out'};
+      const authority = {scope: key, signal: state.controller.signal, async revalidate(previous, signal) {
+        signal.throwIfAborted(); state.checks++;
+        if (!state.allowed) return undefined;
+        return {identity: {...previous, expiresAt: Date.now() + 2000}, scope: key};
+      }};
+      return fetchWithContribution(new Request('https://workshop.invalid/api', request),
+        env, ctx, identity, target, authority);
+    }};
+  `});
   runtime = new Miniflare({modulesRoot, modules,
     compatibilityDate: config.compatibility_date, compatibilityFlags: config.compatibility_flags,
     durableObjects: Object.fromEntries(config.migrations.flatMap(migration => migration.new_sqlite_classes ?? [])
@@ -193,4 +222,74 @@ test('native human rejection removes provisional work and records the human deci
   assert.deepEqual(decision?.author, await owner.account.whoami());
   await workspace.deleteChat(chat);
   await assert.rejects(Promise.resolve(contribution.observe()), /No such chatId/);
+});
+
+
+async function machineContribution(person, workspaceId, chatId) {
+  const key = crypto.randomUUID();
+  const response = await runtime.dispatchFetch('https://workshop.invalid/fixture-contribution', {
+    headers: {Upgrade: 'websocket', Origin: 'https://workshop.invalid', 'fixture-key': key,
+      'fixture-person': person.name, 'fixture-target': JSON.stringify({workspaceId, chatId, author})},
+  });
+  if (response.status !== 101) return {response, key};
+  const socket = response.webSocket; socket.accept();
+  retain({[Symbol.dispose]() {socket.close(1000, 'test completed');}});
+  return {response, key, socket, contribution: retain(newWebSocketRpcSession(socket))};
+}
+
+test('machine entry retains the exact native proposal root across renewals and human acceptance', {timeout: 30000}, async () => {
+  const owner = await person();
+  const workspace = retain(await owner.account.newGadget());
+  const id = (await workspace.getMetadata()).id;
+  const chat = await workspace.newChat('Machine native proposal', null);
+  const {response, contribution, key} = await machineContribution(owner, id, chat);
+  assert.equal(response.status, 101);
+  assert.deepEqual(await contribution.getInfo(), {workspaceId: id, chatId: chat, author: {type: 'agent', ...author}});
+  for (const method of ['authenticateExternal', 'whoami', 'openGadget', 'newGadget', 'mergeChanges', 'updateCode']) {
+    await assert.rejects(Promise.resolve(contribution[method]()), /not a function/);
+  }
+  const gadget = await contribution.createGadget('Machine draft', 'MACHINE_DRAFT');
+  const observed = await contribution.observe();
+  await contribution.proposeCode(addFile(observed.update, gadget.filesRoot, 'machine.txt', 'same held native draft'));
+  // Original handshake is now expired, but the same capability and native provisional work live
+  // under current finite checks. No reconnect, second account, workspace or proposal store.
+  await new Promise(resolve => setTimeout(resolve, 2300));
+  const status = await (await runtime.dispatchFetch('https://workshop.invalid/fixture-control?key=' + key)).json();
+  assert.ok(status.checks >= 2);
+  assert.equal(fileText((await contribution.observe()).update, gadget.filesRoot, 'machine.txt'), 'same held native draft');
+  await contribution.finalizeDraft();
+  const history = await workspace.getChatHistory(chat);
+  const changes = history.messages.filter(message => message.type === 'changes');
+  assert.deepEqual(changes.at(-1).author, {type: 'agent', ...author});
+  assert.deepEqual(history.messages.find(message => message.type === 'message').author, await owner.account.whoami());
+  await workspace.mergeChanges(chat, changes.at(-1).sequence);
+  const accepted = await contribution.observe();
+  assert.equal(accepted.workpieces.find(item => item.id === gadget.id)?.chatId, undefined);
+  assert.equal(fileText(accepted.update, gadget.filesRoot, 'machine.txt'), 'same held native draft');
+  await runtime.dispatchFetch('https://workshop.invalid/fixture-control?key=' + key + '&revoke=1');
+  await eventuallyRejected(() => contribution.observe());
+});
+
+test('machine entry denies unshared, use-only and unrelated-chat authority before upgrade', {timeout: 30000}, async () => {
+  const owner = await person(); const other = await person();
+  const workspace = retain(await owner.account.newGadget());
+  const id = (await workspace.getMetadata()).id;
+  const chat = await workspace.newChat('Exact chat', null);
+  assert.equal((await machineContribution(other, id, chat)).response.status, 403);
+  await workspace.addCollaborator(other.name, 'use');
+  assert.equal((await machineContribution(other, id, chat)).response.status, 403);
+  assert.equal((await machineContribution(owner, id, 999999)).response.status, 403);
+});
+
+test('native sharing revocation closes the machine root although its host authority remains current', {timeout: 30000}, async () => {
+  const owner = await person(); const other = await person();
+  const workspace = retain(await owner.account.newGadget());
+  const id = (await workspace.getMetadata()).id;
+  const chat = await workspace.newChat('Shared machine chat', null);
+  await workspace.addCollaborator(other.name, 'build');
+  const machine = await machineContribution(other, id, chat);
+  assert.equal(machine.response.status, 101);
+  assert.equal((await machine.contribution.getInfo()).workspaceId, id);
+  await workspace.removeCollaborator(other.name, []);
+  await eventuallyRejected(() => machine.contribution.observe());
 });
