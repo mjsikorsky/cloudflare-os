@@ -73,6 +73,8 @@ declare global {
 
       // Public base URL of the deployment.
       PUBLIC_BASE_URL?: string;
+      /** Deployment-owned same-origin form action for native chat selection. */
+      EXTERNAL_AGENT_LAUNCH?: {label: string; actionUrl: string};
 
       // Daily free-tier LLM-call limit (per user). Defaults to DEFAULT_DAILY_LLM_CALL_LIMIT.
       DAILY_LLM_CALL_LIMIT?: string;

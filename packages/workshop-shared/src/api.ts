@@ -851,9 +851,21 @@ export type AuthVendorInfo = {
   color?: string;
 };
 
+/** Deployment-owned entry point receiving native workspace/chat selection as intent.
+ * The destination independently authenticates the person and authorizes the resource.
+ */
+export interface ExternalAgentLaunch {
+  /** Human-readable name of the external agent environment. */
+  label: string;
+  /** Absolute same-origin path accepting a form POST; no query or fragment. */
+  actionUrl: string;
+}
+
 // Deployment-level configuration that the client needs at boot to decide what UI to render.
 // Returned by `PublicApi.getServerConfig()`. Contains no secrets.
 export type ServerConfig = {
+  /** Configured external agent launcher; it carries no resource capability. */
+  externalAgentLaunch?: ExternalAgentLaunch;
   /** Present only on connections admitted by an embedding host. The host owns sign-out. */
   externalAuthentication?: { logoutUrl: string };
   // Auth-capable, allowlisted gatekeeper vendors offered as sign-in methods. Empty when none are

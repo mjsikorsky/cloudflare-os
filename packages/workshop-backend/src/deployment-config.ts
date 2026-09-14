@@ -9,6 +9,7 @@ import { isCloudflareLimitsEnabled } from "./ai-gateway-billing/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { readAdminConfig } from "./admin-config.js";
 import { siteLogoImage } from "./site-logo.js";
+import { parseExternalAgentLaunch } from './external-agent-launch.js';
 
 const logger = createWorkshopLogger("workshop.deployment.config");
 
@@ -46,6 +47,7 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
     getAuthVendors(env),
   ]);
   return {
+    externalAgentLaunch: parseExternalAgentLaunch(env.EXTERNAL_AGENT_LAUNCH),
     authVendors,
     passwordAuthEnabled: isPasswordAuthEnabled(env),
     cloudflareLimitsEnabled: isCloudflareLimitsEnabled(env),

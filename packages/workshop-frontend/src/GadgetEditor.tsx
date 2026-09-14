@@ -18,6 +18,7 @@ import { RpcStub, RpcTarget } from 'capnweb'
 import { useAuthenticatedApi } from './AuthContext'
 import UserMenu from './components/UserMenu'
 import SiteLogo from './components/SiteLogo'
+import ExternalAgentLaunch from './components/ExternalAgentLaunch'
 
 import {
   AiChatAuthorInfo,
@@ -1377,6 +1378,7 @@ export default function GadgetEditor() {
 
         {/* Right: presence, cost, workspace, share, blueprints */}
         <div className="flex items-center gap-1 flex-shrink-0">
+          {id && <ExternalAgentLaunch workspaceId={id} chatId={effectiveSelectedChatId} />}
           <GadgetPresence
             overseer={overseer.stub}
             authenticatedApi={authenticatedApi}
