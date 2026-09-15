@@ -3,7 +3,7 @@ import { StrictMode, useState, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from '@tanstack/react-router'
 import { RpcStub, newWebSocketRpcSession } from 'capnweb'
-import { PublicApi } from '@gadgets/workshop-shared/api'
+import { PublicApi, resolveSiteName } from '@gadgets/workshop-shared/api'
 import { RpcContext } from './RpcContext'
 import { ServerConfigContext, ServerConfigErrorContext, ConnectionConfigContext } from './ServerConfigContext'
 import { ThemeProvider } from './ThemeContext'
@@ -143,8 +143,12 @@ function AppWithConnection() {
     applyAccentColor(serverConfig?.accentColor ?? '');
   }, [serverConfig?.accentColor]);
 
+  // The tab shows this deployment's name and mark only once its configuration has arrived; the
+  // static page carries neither. A route that sets its own document title keeps it.
   useEffect(() => {
-    return applySiteFavicon(serverConfig?.siteLogo?.url);
+    if (!serverConfig) return;
+    if (!document.title) document.title = resolveSiteName(serverConfig.siteName);
+    return applySiteFavicon(serverConfig.siteLogo?.url);
   }, [serverConfig]);
 
   return (
