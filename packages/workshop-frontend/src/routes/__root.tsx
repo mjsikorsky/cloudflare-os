@@ -3,7 +3,7 @@ import { createRootRoute, Outlet, useRouterState } from '@tanstack/react-router'
 import { TooltipProvider, Toasty } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
-import { useRpcStub, useConnectionLost } from '../RpcContext'
+import { useRpcStub, useConnectionLostNotice } from '../RpcContext'
 import { markConnectionRestored } from '../main'
 import { useAuth } from '../useAuth'
 import { AuthProvider } from '../AuthContext'
@@ -28,7 +28,8 @@ function ConnectionLostBanner() {
 
 function RootComponent() {
   const rpcStub = useRpcStub()
-  const connectionLost = useConnectionLost()
+  // What the page shows: a connection that comes back within the notice delay says nothing.
+  const connectionLost = useConnectionLostNotice()
   const { isAuthenticated, authenticatedApi, isLoading, error, logout, login, signIn, externallyManaged, visitor } = useAuth(rpcStub)
   const pathname = useRouterState({ select: (s) => s.location.pathname })
 

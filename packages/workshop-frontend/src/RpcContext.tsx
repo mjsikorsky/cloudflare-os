@@ -1,4 +1,4 @@
-import { createContext, useContext } from 'react'
+import { createContext, useContext, useEffect, useState } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi } from '@gadgets/workshop-shared/api'
 
@@ -15,4 +15,22 @@ export function useRpcStub(): RpcStub<PublicApi> {
 export function useConnectionLost(): boolean {
   const ctx = useContext(RpcContext)
   return ctx?.connectionLost ?? false
+}
+
+/** How long the connection may be down before the page says so. The isolate holding the socket
+ * is recycled every few minutes and the replacement connection is usually proven within a
+ * couple of seconds; a notice for every one of those is noise, not information. */
+export const CONNECTION_LOST_NOTICE_DELAY_MS = 5000
+
+/** True once the connection has been down longer than the notice delay; false again the moment
+ * it is restored. Use this for what people see; `useConnectionLost` stays the exact state. */
+export function useConnectionLostNotice(delayMs = CONNECTION_LOST_NOTICE_DELAY_MS): boolean {
+  const lost = useConnectionLost()
+  const [notice, setNotice] = useState(false)
+  useEffect(() => {
+    if (!lost) { setNotice(false); return }
+    const timer = setTimeout(() => setNotice(true), delayMs)
+    return () => clearTimeout(timer)
+  }, [lost, delayMs])
+  return lost && notice
 }
