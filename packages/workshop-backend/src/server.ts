@@ -30,6 +30,7 @@ import { validateExternalIdentity, validateExternalVisitor,
     type ExternalIdentity, type ExternalVisitor } from "./auth/external.js";
 import { ExternalAdmissionSeat, type ExternalConnectionAuthority } from "./auth/external-seat.js";
 import { validateExternalContribution, type ExternalContributionTarget } from "./auth/external-contribution.js";
+import { isVerifierIdentityId, validateExternalVerifierTarget, type ExternalVerifierTarget } from "./auth/external-verifier.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
@@ -819,6 +820,144 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 }
 
+/** The account surface a verifier seat exposes: exactly what the native workshop frontend calls on
+ * the way to rendering one "use" workspace. Every other account method is denied explicitly, as
+ * UseOverseerInterface denies build-only methods; nothing here can list, create, connect or share.
+ */
+@validateRpc()
+class VerifierAccountImpl extends RpcTarget implements AuthenticatedApi {
+  constructor(private env: Env,
+      private user: DurableObjectStub<UserDurableObject>,
+      private account: AuthenticatedApiImpl,
+      private target: Readonly<ExternalVerifierTarget>) {
+    super();
+  }
+
+  // Throws "Unauthorized" for any method not available to a verifier seat.
+  #deny(): never {
+    throw new Error("Unauthorized: a verifier may only use the one workspace it was admitted to.");
+  }
+
+  // --- Allowed methods ---
+
+  whoami(): Promise<AiChatAuthorInfo> {
+    return this.user.whoami();
+  }
+
+  async amIAdmin(): Promise<boolean> {
+    return false;
+  }
+
+  async isOnboardingCompleted(): Promise<boolean> {
+    return true;
+  }
+
+  async getAvatar(_userId: string): Promise<Uint8Array | null> {
+    return null;
+  }
+
+  getUiFeatureFlags(): Promise<UiFeatureFlags> {
+    return resolveUiFeatureFlags(this.env, this.user.id.name!);
+  }
+
+  /** The one workspace this seat was admitted to, opened natively with the host's "use" grant on
+   * every call: redemption is idempotent, the role is recomputed, and a revoked grant is denied
+   * here exactly as for any collaborator. The client's share key and observer callback are
+   * ignored: the grant is the host's, and a "use" seat never configures observers. */
+  async openGadget(id: string, _shareKey?: string,
+                   configureObservers?: RpcStub<ObserverConfigCallback>): Promise<RpcStub<Overseer>> {
+    configureObservers?.[Symbol.dispose]();
+    if (id !== this.target.gadgetId) {
+      throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+    }
+    return openVerifierSeat(this.account, this.target);
+  }
+
+  // --- Denied methods (the rest of the account surface) ---
+
+  async setOwnDisplayName(): Promise<never> { this.#deny(); }
+  async changePassword(): Promise<never> { this.#deny(); }
+  async hasPasswordLogin(): Promise<never> { this.#deny(); }
+  async listModels(): Promise<never> { this.#deny(); }
+  async addModel(): Promise<never> { this.#deny(); }
+  async deleteModel(): Promise<never> { this.#deny(); }
+  async setQuickModel(): Promise<never> { this.#deny(); }
+  async getQuickModel(): Promise<never> { this.#deny(); }
+  async getAiConfig(): Promise<never> { this.#deny(); }
+  async getPreferredModel(): Promise<never> { this.#deny(); }
+  async setPreferredModel(): Promise<never> { this.#deny(); }
+  async completeOnboarding(): Promise<never> { this.#deny(); }
+  async getCloudflareUsage(): Promise<never> { this.#deny(); }
+  async listCloudflareAccounts(): Promise<never> { this.#deny(); }
+  async selectCloudflareAccount(): Promise<never> { this.#deny(); }
+  async setAvatar(): Promise<never> { this.#deny(); }
+  async newGadget(): Promise<never> { this.#deny(); }
+  async listGadgets(): Promise<never> { this.#deny(); }
+  async listOutputs(): Promise<never> { this.#deny(); }
+  async listOutputFormats(): Promise<never> { this.#deny(); }
+  async listGatekeeperVendors(): Promise<never> { this.#deny(); }
+  async connectAccount(): Promise<never> { this.#deny(); }
+  async ensureAccountResources(): Promise<never> { this.#deny(); }
+  async listAddableGatekeepers(): Promise<never> { this.#deny(); }
+  async provisionAmbientAccount(): Promise<never> { this.#deny(); }
+  async subscribeConnectedAccounts(): Promise<never> { this.#deny(); }
+  async disconnectAccount(): Promise<never> { this.#deny(); }
+  async startResourceConfigurator(): Promise<never> { this.#deny(); }
+  async dismissSharedGadget(): Promise<never> { this.#deny(); }
+  async listOwnBlueprints(): Promise<never> { this.#deny(); }
+  async getOwnBlueprint(): Promise<never> { this.#deny(); }
+  async listLibraryBlueprints(): Promise<never> { this.#deny(); }
+  async setBlueprintPinned(): Promise<never> { this.#deny(); }
+  async isBlueprintPinned(): Promise<never> { this.#deny(); }
+  async listFeaturedBlueprints(): Promise<never> { this.#deny(); }
+  async addBlueprintToLibrary(): Promise<never> { this.#deny(); }
+  async removeBlueprintFromLibrary(): Promise<never> { this.#deny(); }
+  async isBlueprintInLibrary(): Promise<never> { this.#deny(); }
+  async newGadgetFromBlueprint(): Promise<never> { this.#deny(); }
+  async deleteOrphanedBlueprint(): Promise<never> { this.#deny(); }
+  async importBlueprint(): Promise<never> { this.#deny(); }
+  async reconnectAccount(): Promise<never> { this.#deny(); }
+  async listGatekeeperApps(): Promise<never> { this.#deny(); }
+  async getGatekeeperApp(): Promise<never> { this.#deny(); }
+  async getAdminApi(): Promise<never> { this.#deny(); }
+}
+
+/** Open the verifier's one workspace through native sharing and keep only a "use" capability. */
+async function openVerifierSeat(account: AuthenticatedApiImpl,
+    target: Readonly<ExternalVerifierTarget>): Promise<RpcStub<Overseer>> {
+  const seat = await account.openGadget(target.gadgetId, target.shareKey);
+  let role: string | undefined;
+  try {
+    role = (await seat.getMetadata()).role;
+  } finally {
+    if (role !== "use") seat[Symbol.dispose]();
+  }
+  if (role !== "use") throw new Error("A verifier seat must hold the use role only.");
+  return seat;
+}
+
+/** The root of a verifier connection: deployment configuration in the host-authenticated form, and
+ * the verifier account above. No native sign-in method exists on this target.
+ */
+@validateRpc()
+class VerifierRootImpl extends RpcTarget {
+  constructor(private env: Env, private seat: ExternalAdmissionSeat,
+      private account: VerifierAccountImpl) {
+    super();
+  }
+
+  async getServerConfig(): Promise<ServerConfig> {
+    const config = await getServerConfig(this.env);
+    return {...config, passwordAuthEnabled: false, authVendors: [],
+      externalAuthentication: {logoutUrl: this.seat.current().logoutUrl}};
+  }
+
+  async authenticateExternal(): Promise<AuthenticatedApi> {
+    this.seat.current();
+    return this.account;
+  }
+}
+
 /** Serve a request admitted by an embedding host. This is a server-side integration interface;
  * default HTTP handling never derives this authority from request headers or client arguments.
  * The host remains responsible for authenticating every request and its tenant/workspace access.
@@ -829,6 +968,7 @@ export async function fetchWithIdentity(
     req: Request, env: Env, ctx: ExecutionContext, identity: ExternalIdentity,
     authority?: ExternalConnectionAuthority): Promise<Response> {
   const admission = validateExternalIdentity(identity, req.url);
+  if (isVerifierIdentityId(admission.id)) throw new Error("A verifier identity cannot hold an account.");
   return handleRequest(req, env, ctx, admission, authority);
 }
 
@@ -854,14 +994,35 @@ export async function fetchWithContribution(req: Request, env: Env, ctx: Executi
     return new Response("Not Found", {status: 404});
   }
   const admission = validateExternalIdentity(identity, req.url);
+  if (isVerifierIdentityId(admission.id)) throw new Error("A verifier identity cannot hold an account.");
   const contribution = validateExternalContribution(target);
   return handleRequest(req, env, ctx, admission, authority, contribution);
+}
+
+/** Serve only a pre-opened "use" seat on one exact gadget to a host-admitted verifier who has no
+ * account of their own. The host mints the identity in the verifier namespace and supplies the
+ * "use" grant; native sharing, observer verification and the "use" capability decide everything
+ * else. The connection's root reaches configuration and this one workspace; clients cannot select
+ * another resource, change identity, or reach the account API.
+ */
+export async function fetchAsVerifier(req: Request, env: Env, ctx: ExecutionContext,
+    identity: ExternalIdentity, target: ExternalVerifierTarget,
+    authority?: ExternalConnectionAuthority): Promise<Response> {
+  const url = new URL(req.url);
+  if (url.pathname !== "/api" || url.search || req.method !== "GET") {
+    return new Response("Not Found", {status: 404});
+  }
+  const admission = validateExternalIdentity(identity, req.url);
+  if (!isVerifierIdentityId(admission.id)) throw new Error("A verifier identity is required.");
+  const verifier = validateExternalVerifierTarget(target);
+  return handleRequest(req, env, ctx, admission, authority, undefined, undefined, verifier);
 }
 
 async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
     externalIdentity?: Readonly<ExternalIdentity>, authority?: ExternalConnectionAuthority,
     externalContribution?: Readonly<ExternalContributionTarget>,
-    externalVisitor?: Readonly<ExternalVisitor>): Promise<Response> {
+    externalVisitor?: Readonly<ExternalVisitor>,
+    externalVerifier?: Readonly<ExternalVerifierTarget>): Promise<Response> {
     let url = new URL(req.url);
 
     if (url.pathname === SITE_LOGO_PATH) {
@@ -954,12 +1115,13 @@ async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
         const hostApi = new PublicApiImpl(ctx, env, abortSession, accessPayload, seat);
         let parent: RpcStub<Overseer> | undefined;
         let contribution: RpcStub<WorkspaceContribution> | undefined;
+        let verifierRoot: VerifierRootImpl | undefined;
         const releaseParent = () => {
           const owned = parent;
           parent = undefined;
           owned?.[Symbol.dispose]();
         };
-        if (externalContribution) releaseContributionParent = releaseParent;
+        if (externalContribution || externalVerifier) releaseContributionParent = releaseParent;
         const cancelSetup = () => seat?.close();
         const checkSetup = () => {
           req.signal.throwIfAborted();
@@ -978,13 +1140,32 @@ async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
             checkSetup();
             contribution = await parent.createContribution(externalContribution.chatId, externalContribution.author);
             checkSetup();
+          } else if (externalVerifier) {
+            req.signal.addEventListener("abort", cancelSetup, {once: true});
+            checkSetup();
+            // A verifier's account exists only to hold grants and presence; it is created by this
+            // host admission regardless of sign-up policy, since the namespace can never reach the
+            // account API (see fetchWithIdentity/fetchWithContribution).
+            const users = ctx.exports.UserDurableObject;
+            const user = users.get(users.idFromName(externalIdentity.id));
+            await user.authenticateExternal(externalIdentity.id, externalIdentity.name, true);
+            checkSetup();
+            const account = new AuthenticatedApiImpl(ctx, env, user, abortSession);
+            // Native openGadget redeems the grant and computes the effective role; the connection
+            // is refused unless that role is exactly "use". The capability itself is released:
+            // the seat account re-opens (and re-checks) on every client openGadget.
+            parent = await openVerifierSeat(account, externalVerifier);
+            checkSetup();
+            releaseParent();
+            verifierRoot = new VerifierRootImpl(env, seat,
+                new VerifierAccountImpl(env, user, account, externalVerifier));
           }
           const pair = new WebSocketPair();
           hostSocket = pair[0];
           hostSocket.accept();
           // Cap'n Web natively accepts a capability as the root. No proxy/method filter or
           // parallel implementation of WorkspaceContribution is involved.
-          const rpc = newWebSocketRpcSession(hostSocket, contribution ?? hostApi);
+          const rpc = newWebSocketRpcSession(hostSocket, contribution ?? verifierRoot ?? hostApi);
           contribution = undefined;  // Native RPC session now owns the exported root stub.
           hostSocket.addEventListener("close", () => {
             try { seat?.close(); }
@@ -1000,7 +1181,8 @@ async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
             try { releaseParent(); }
             finally { seat.close(); }
           }
-          return new Response("External contribution access denied.", {status: 403});
+          return new Response(externalVerifier ? "External verifier access denied."
+              : "External contribution access denied.", {status: 403});
         } finally {
           req.signal.removeEventListener("abort", cancelSetup);
         }

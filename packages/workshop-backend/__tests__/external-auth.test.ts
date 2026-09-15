@@ -53,3 +53,29 @@ describe("host visitor admission", () => {
     expect(() => validateExternalVisitor(value as never, "https://host.example")).toThrow();
   });
 });
+
+import {isVerifierIdentityId, validateExternalVerifierTarget} from "../src/auth/external-verifier";
+
+const gadgetId = "a".repeat(64);
+describe("host verifier target", () => {
+  it("snapshots the exact workspace and grant", () => {
+    const input = {gadgetId, shareKey: "0f1e"};
+    const result = validateExternalVerifierTarget(input);
+    (input as {gadgetId: string}).gadgetId = "b".repeat(64);
+    expect(result).toEqual({gadgetId, shareKey: "0f1e"});
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(validateExternalVerifierTarget({gadgetId})).toEqual({gadgetId});
+  });
+  it.each([undefined, null, 123, "", "abc", "A".repeat(64), gadgetId + "0"])("rejects workspace %s", value => {
+    expect(() => validateExternalVerifierTarget({gadgetId: value} as never)).toThrow("Invalid external verifier target.");
+  });
+  it.each([null, 123, "", "z", "0", "0".repeat(513)])("rejects grant %s", shareKey => {
+    expect(() => validateExternalVerifierTarget({gadgetId, shareKey} as never)).toThrow("Invalid external verifier target.");
+  });
+  it("recognizes only the verifier identity namespace", () => {
+    expect(isVerifierIdentityId("openv-abc")).toBe(true);
+    expect(isVerifierIdentityId("host-person-1")).toBe(false);
+    expect(isVerifierIdentityId("legion-openv-abc")).toBe(false);
+    expect(isVerifierIdentityId(undefined)).toBe(false);
+  });
+});

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { newWebSocketRpcSession } from "capnweb";
+import { newWebSocketRpcSession, RpcTarget } from "capnweb";
 import type { PublicApi } from "@gadgets/workshop-shared/api";
-import nativeServer, { fetchWithIdentity, fetchAsVisitor } from "../src/server";
+import nativeServer, { fetchWithIdentity, fetchAsVisitor, fetchWithContribution, fetchAsVerifier } from "../src/server";
 
 // Real workerd WebSocketPair and Cap'n Web serialization; only the account/config
 // persistence boundary is a fixture. This does not prove Clerk or UserDO tenancy.
@@ -38,7 +38,7 @@ function closed(socket: WebSocket) {
 
 // Send adversarial calls on the native wire and inspect rejection frames directly.
 // Successful authentication and retained-capability expiry below use the real RPC client.
-function rejectedCall(socket: WebSocket, method: string, args: unknown[]) {
+function rejectedCall(socket: WebSocket, method: string, args: unknown[], target = 0) {
   return new Promise<unknown[]>((resolve, reject) => {
     const timer = setTimeout(() => {socket.removeEventListener("message", receive); reject(new Error("Missing RPC rejection"));}, 2000);
     function receive(event: MessageEvent) {
@@ -47,7 +47,7 @@ function rejectedCall(socket: WebSocket, method: string, args: unknown[]) {
       resolve(JSON.parse(event.data as string) as unknown[]);
     }
     socket.addEventListener("message", receive);
-    socket.send(JSON.stringify(["stream", ["pipeline", 0, [method], args]]));
+    socket.send(JSON.stringify(["stream", ["pipeline", target, [method], args]]));
   });
 }
 
@@ -243,5 +243,112 @@ describe("host admission on native workerd RPC transport", () => {
       expect(frame[2]).toEqual(["error", "Error", "No current external identity admission."]);
       expect(f.authenticateExternal).not.toHaveBeenCalled();
     } finally {socket.close();}
+  });
+
+  // ---- verifier seats (Open-V) ----
+
+  const gadgetId = "c".repeat(64);
+  function verifierFixture(role: "use" | "build" = "use") {
+    const f = fixture();
+    const profile = {type: "user" as const, id: "openv-verifier-1", name: "friend@example.com"};
+    const created = vi.fn(async (_id: string, _name: string, allowCreate: boolean) => allowCreate);
+    const user = {authenticateExternal: created, whoami: async () => profile,
+      id: {toString: () => "openv-verifier-1", name: "openv-verifier-1"},
+      forgetSharedGadget: async () => {}};
+    class FakeOverseer extends RpcTarget {
+      async getMetadata() {
+        return {id: gadgetId, title: "Tic Tac Toe", role, owner: profile, defaultGadgetId: 0};
+      }
+      [Symbol.dispose]() {}
+    }
+    const open = vi.fn(async () => new FakeOverseer());
+    (f.ctx as unknown as {exports: Record<string, unknown>}).exports.UserDurableObject =
+        {idFromName: (id: string) => id, get: () => user};
+    (f.ctx as unknown as {exports: Record<string, unknown>}).exports.OverseerDurableObject =
+        {idFromString: (id: string) => id, get: () => ({open})};
+    return {...f, created, open};
+  }
+  function verifier(lifetime = 1000) {
+    return {id: "openv-verifier-1", name: "friend@example.com", expiresAt: Date.now() + lifetime,
+      logoutUrl: "/sign-out"};
+  }
+
+  it("admits a host verifier to one pre-opened use seat and nothing else", async () => {
+    const f = verifierFixture();
+    const response = await fetchAsVerifier(request(), f.env, f.ctx, verifier(), {gadgetId, shareKey: "0f1e"});
+    expect(response.status).toBe(101);
+    // The account was created regardless of sign-up policy, and native openGadget redeemed the
+    // grant once to validate the seat before any transport existed.
+    expect(f.created).toHaveBeenCalledWith("openv-verifier-1", "friend@example.com", true);
+    expect(f.open).toHaveBeenCalledTimes(1);
+    expect(f.open.mock.calls[0][0]).toBe("openv-verifier-1");
+    expect(f.open.mock.calls[0][3]).toBe("0f1e");
+    const socket = response.webSocket!;
+    socket.accept();
+    try {
+      using api = newWebSocketRpcSession<PublicApi>(socket);
+      const config = await api.getServerConfig();
+      expect(config.externalAuthentication).toEqual({logoutUrl: "/sign-out"});
+      expect(config.passwordAuthEnabled).toBe(false);
+      using account = await api.authenticateExternal();
+      expect((await account.whoami()).id).toBe("openv-verifier-1");
+      expect(await account.amIAdmin()).toBe(false);
+      expect(await account.isOnboardingCompleted()).toBe(true);
+      // Each client open is a native open with the host's grant, never the client's arguments.
+      using seat = await account.openGadget(gadgetId, "client-supplied-key");
+      expect((await seat.getMetadata()).role).toBe("use");
+      expect(f.open).toHaveBeenCalledTimes(2);
+      expect(f.open.mock.calls[1][3]).toBe("0f1e");
+    } finally {socket.close();}
+    // Refusals on the account capability: inspect the rejection frames on the wire (as the visitor
+    // test does for the root), so no pipelined client promise is left dangling.
+    const raw = (await fetchAsVerifier(request(), f.env, f.ctx, verifier(), {gadgetId, shareKey: "0f1e"})).webSocket!;
+    raw.accept();
+    try {
+      // Export 1 = the verifier account.
+      raw.send(JSON.stringify(["push", ["pipeline", 0, ["authenticateExternal"], []]]));
+      const before = f.open.mock.calls.length;
+      // Only the admitted workspace opens.
+      let frame = await rejectedCall(raw, "openGadget", ["d".repeat(64)], 1);
+      expect(frame[0]).toBe("reject");
+      expect(String(frame[2])).toContain("access to this workspace");
+      expect(f.open).toHaveBeenCalledTimes(before);
+      // Everything else on the account surface is denied.
+      for (const method of ["newGadget", "listGadgets", "listOwnBlueprints", "listOutputs", "getAdminApi"]) {
+        frame = await rejectedCall(raw, method, [], 1);
+        expect(frame[0]).toBe("reject");
+        expect(String(frame[2])).toContain("Unauthorized");
+      }
+    } finally {raw.close();}
+  });
+
+  it("refuses a verifier seat that would hold more than the use role", async () => {
+    const f = verifierFixture("build");
+    const response = await fetchAsVerifier(request(), f.env, f.ctx, verifier(), {gadgetId});
+    expect(response.status).toBe(403);
+    expect(await response.text()).toBe("External verifier access denied.");
+  });
+
+  it("keeps the verifier namespace out of every account entry", async () => {
+    const f = verifierFixture();
+    await expect(fetchWithIdentity(request(), f.env, f.ctx, verifier())).rejects.toThrow("cannot hold an account");
+    await expect(fetchWithContribution(request(), f.env, f.ctx, verifier(),
+        {workspaceId: gadgetId, chatId: 0, author: {id: "a", name: "a"}})).rejects.toThrow("cannot hold an account");
+    await expect(fetchAsVerifier(request(), f.env, f.ctx, admission(), {gadgetId})).rejects.toThrow("verifier identity is required");
+    expect((await fetchAsVerifier(request("POST"), f.env, f.ctx, verifier(), {gadgetId})).status).toBe(404);
+    expect(f.created).not.toHaveBeenCalled();
+    expect(f.open).not.toHaveBeenCalled();
+  });
+
+  it("refuses a native sign-in on a verifier connection", async () => {
+    const f = verifierFixture();
+    const raw = (await fetchAsVerifier(request(), f.env, f.ctx, verifier(), {gadgetId})).webSocket!;
+    raw.accept();
+    try {
+      for (const method of ["authenticate", "startGatekeeperLogin", "authenticateFromCfAccess"]) {
+        const frame = await rejectedCall(raw, method, ["x"]);
+        expect(frame[0]).toBe("reject");
+      }
+    } finally {raw.close();}
   });
 });
