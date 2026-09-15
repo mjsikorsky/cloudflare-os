@@ -1,5 +1,5 @@
 import {describe, it, expect} from "vitest";
-import {validateExternalIdentity, validateExternalVisitor} from "../src/auth/external";
+import {validateExternalIdentity, validateExternalVisitor, VERIFIER_ADMISSION_MAX_MS} from "../src/auth/external";
 
 const now = 1000;
 const admission = {id: "host-person-1", name: "Person", expiresAt: now + 60_000,
@@ -77,5 +77,15 @@ describe("host verifier target", () => {
     expect(isVerifierIdentityId("host-person-1")).toBe(false);
     expect(isVerifierIdentityId("legion-openv-abc")).toBe(false);
     expect(isVerifierIdentityId(undefined)).toBe(false);
+  });
+});
+
+describe("host admission lifetime", () => {
+  it("caps a person's admission at five minutes and a verifier's at the grant's life", () => {
+    const week = now + VERIFIER_ADMISSION_MAX_MS;
+    expect(() => validateExternalIdentity({...admission, expiresAt: now + 300_001}, "https://host.example", now)).toThrow();
+    expect(validateExternalIdentity({...admission, expiresAt: week}, "https://host.example", now, VERIFIER_ADMISSION_MAX_MS).expiresAt).toBe(week);
+    expect(() => validateExternalIdentity({...admission, expiresAt: week + 1}, "https://host.example", now, VERIFIER_ADMISSION_MAX_MS)).toThrow();
+    expect(VERIFIER_ADMISSION_MAX_MS).toBeLessThan(2 ** 31);
   });
 });

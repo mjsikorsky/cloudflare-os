@@ -26,7 +26,7 @@ import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
-import { validateExternalIdentity, validateExternalVisitor,
+import { validateExternalIdentity, validateExternalVisitor, VERIFIER_ADMISSION_MAX_MS,
     type ExternalIdentity, type ExternalVisitor } from "./auth/external.js";
 import { ExternalAdmissionSeat, type ExternalConnectionAuthority } from "./auth/external-seat.js";
 import { validateExternalContribution, type ExternalContributionTarget } from "./auth/external-contribution.js";
@@ -1003,19 +1003,20 @@ export async function fetchWithContribution(req: Request, env: Env, ctx: Executi
  * account of their own. The host mints the identity in the verifier namespace and supplies the
  * "use" grant; native sharing, observer verification and the "use" capability decide everything
  * else. The connection's root reaches configuration and this one workspace; clients cannot select
- * another resource, change identity, or reach the account API.
+ * another resource, change identity, or reach the account API. The admission runs for the life of
+ * the grant (up to VERIFIER_ADMISSION_MAX_MS) with no host re-check: a revoked grant is refused at
+ * the verifier's next open, exactly as for any other collaborator.
  */
 export async function fetchAsVerifier(req: Request, env: Env, ctx: ExecutionContext,
-    identity: ExternalIdentity, target: ExternalVerifierTarget,
-    authority?: ExternalConnectionAuthority): Promise<Response> {
+    identity: ExternalIdentity, target: ExternalVerifierTarget): Promise<Response> {
   const url = new URL(req.url);
   if (url.pathname !== "/api" || url.search || req.method !== "GET") {
     return new Response("Not Found", {status: 404});
   }
-  const admission = validateExternalIdentity(identity, req.url);
+  const admission = validateExternalIdentity(identity, req.url, Date.now(), VERIFIER_ADMISSION_MAX_MS);
   if (!isVerifierIdentityId(admission.id)) throw new Error("A verifier identity is required.");
   const verifier = validateExternalVerifierTarget(target);
-  return handleRequest(req, env, ctx, admission, authority, undefined, undefined, verifier);
+  return handleRequest(req, env, ctx, admission, undefined, undefined, undefined, verifier);
 }
 
 async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
@@ -1110,7 +1111,8 @@ async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
       const api = new PublicApiImpl(ctx, env, abortSession, accessPayload, undefined, externalVisitor);
       if (externalIdentity) {
         seat = new ExternalAdmissionSeat(externalIdentity, req.url,
-            () => abortSession(new Error("Host admission ended.")), authority);
+            () => abortSession(new Error("Host admission ended.")), authority,
+            externalVerifier ? VERIFIER_ADMISSION_MAX_MS : undefined);
         if (aborted) return new Response("Host authority ended.", {status: 403});
         const hostApi = new PublicApiImpl(ctx, env, abortSession, accessPayload, seat);
         let parent: RpcStub<Overseer> | undefined;

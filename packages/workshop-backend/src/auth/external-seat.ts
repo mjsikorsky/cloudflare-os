@@ -24,8 +24,9 @@ export class ExternalAdmissionSeat {
   #onAuthorityEnd = () => this.close();
 
   constructor(identity: ExternalIdentity, private requestUrl: string,
-      private abortSession: () => void, authority?: ExternalConnectionAuthority) {
-    this.#identity = validateExternalIdentity(identity, requestUrl);
+      private abortSession: () => void, authority?: ExternalConnectionAuthority,
+      private maxLifetimeMs?: number) {
+    this.#identity = validateExternalIdentity(identity, requestUrl, Date.now(), maxLifetimeMs);
     if (authority) {
       if (!(authority.signal instanceof AbortSignal) || typeof authority.revalidate !== "function" ||
           typeof authority.scope !== "string" || !/^[\x21-\x7e]{1,4096}$/.test(authority.scope)) {
@@ -76,7 +77,7 @@ export class ExternalAdmissionSeat {
       const result = await this.#revalidate!(previous, this.#ended.signal);
       this.current();
       if (!result) throw new Error("External authority denied.");
-      const next = validateExternalIdentity(result.identity, this.requestUrl);
+      const next = validateExternalIdentity(result.identity, this.requestUrl, Date.now(), this.maxLifetimeMs);
       if (result.scope !== this.#scope || next.id !== previous.id ||
           next.name !== previous.name || next.logoutUrl !== previous.logoutUrl) {
         throw new Error("External authority changed.");

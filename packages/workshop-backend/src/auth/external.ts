@@ -34,14 +34,22 @@ function hostPath(value: unknown, requestUrl: string, what: string): string {
   return url.pathname + url.search + url.hash;
 }
 
+/** How far ahead a host admission may run. A person's admission is short because the host
+ * re-checks their session (renewal); a verifier's admission runs for the life of its grant and is
+ * revoked lazily, at the next open, like any other collaborator. The verifier cap keeps the
+ * seat's expiry timer inside setTimeout's range. */
+export const IDENTITY_ADMISSION_MAX_MS = 300_000;
+export const VERIFIER_ADMISSION_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+
 /** Validate and snapshot a host admission before exposing any RPC capability. */
 export function validateExternalIdentity(
-    identity: ExternalIdentity, requestUrl: string, now = Date.now()): Readonly<ExternalIdentity> {
+    identity: ExternalIdentity, requestUrl: string, now = Date.now(),
+    maxLifetimeMs = IDENTITY_ADMISSION_MAX_MS): Readonly<ExternalIdentity> {
   if (!identity || typeof identity.id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9@._+-]{0,255}$/.test(identity.id)
       || typeof identity.logoutUrl !== "string" || !identity.logoutUrl.trim()
       || typeof identity.name !== "string" || !identity.name.trim() || identity.name.length > 200
       || !Number.isSafeInteger(identity.expiresAt) || identity.expiresAt <= now
-      || identity.expiresAt > now + 300_000) {
+      || identity.expiresAt > now + maxLifetimeMs) {
     throw new Error("Invalid external identity admission.");
   }
   return Object.freeze({ id: identity.id, name: identity.name,

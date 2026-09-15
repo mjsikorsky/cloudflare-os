@@ -322,6 +322,22 @@ describe("host admission on native workerd RPC transport", () => {
     } finally {raw.close();}
   });
 
+  it("admits a verifier for the life of the grant, far beyond a person's five minutes", async () => {
+    const f = verifierFixture();
+    const week = 7 * 24 * 60 * 60 * 1000;
+    const response = await fetchAsVerifier(request(), f.env, f.ctx, verifier(week), {gadgetId});
+    expect(response.status).toBe(101);
+    const socket = response.webSocket!;
+    socket.accept();
+    try {
+      using api = newWebSocketRpcSession<PublicApi>(socket);
+      expect((await api.getServerConfig()).externalAuthentication).toEqual({logoutUrl: "/sign-out"});
+    } finally {socket.close();}
+    // Beyond the verifier cap, or a person's admission at a verifier's length, is refused.
+    await expect(fetchAsVerifier(request(), f.env, f.ctx, verifier(week + 60_000), {gadgetId})).rejects.toThrow("Invalid external identity");
+    await expect(fetchWithIdentity(request(), f.env, f.ctx, admission(week))).rejects.toThrow("Invalid external identity");
+  });
+
   it("refuses a verifier seat that would hold more than the use role", async () => {
     const f = verifierFixture("build");
     const response = await fetchAsVerifier(request(), f.env, f.ctx, verifier(), {gadgetId});
