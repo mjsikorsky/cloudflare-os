@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { PublicApi, AuthenticatedApi, ServerConfig } from '@gadgets/workshop-shared/api'
-import { useServerConfig, useServerConfigError } from './ServerConfigContext'
+import { useConnectionConfig, useServerConfigError } from './ServerConfigContext'
 import { externalLogoutUrl, externalLoginUrl } from './deploymentPaths'
 
 const CF_ACCESS_MODE = import.meta.env.VITE_CF_ACCESS_MODE === 'true'
@@ -24,7 +24,9 @@ const INITIAL_AUTH: AuthState = {
 }
 
 export function useAuth(publicApi: RpcStub<PublicApi>) {
-  const config = useServerConfig()
+  // Admission is proven against the connection that carries it: the current connection's own
+  // config, never the last known one shown by the page.
+  const config = useConnectionConfig()
   const configError = useServerConfigError()
   const logoutUrl = config?.externalAuthentication?.logoutUrl
   const externallyManaged = logoutUrl !== undefined || CF_ACCESS_MODE

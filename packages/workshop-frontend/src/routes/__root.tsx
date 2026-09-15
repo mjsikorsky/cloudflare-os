@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { createRootRoute, Outlet, useRouterState } from '@tanstack/react-router'
 import { TooltipProvider, Toasty } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
@@ -63,8 +63,43 @@ function RootComponent() {
     }
   }
 
+  // The last settled render. When the RPC connection is replaced after a disconnect, admission
+  // starts over on the new connection and `isLoading` is true again for a moment; the page keeps
+  // this render (with the connection-lost banner) instead of unmounting into a spinner, and swaps
+  // to the new admission once it is proven. A capability kept here belongs to the person whose
+  // session was just confirmed; it is only ever replaced by their next confirmed admission, or
+  // cleared when admission ends in an error or a sign-in page.
+  const settled = useRef<{ kind: 'shell'; api: RpcStub<AuthenticatedApi> } | { kind: 'standalone' } | null>(null)
+
+  const renderStandalone = () => (
+    <TooltipProvider>
+      <Toasty>
+        {!isSignup && <Header />}
+        <Outlet />
+      </Toasty>
+    </TooltipProvider>
+  )
+  const renderShell = (api: RpcStub<AuthenticatedApi>) => (
+    <AuthProvider authenticatedApi={api} onLogout={logout}>
+      <FeatureFlagsProvider>
+        <TooltipProvider>
+          <Toasty>
+            <AuthenticatedShell
+              authenticatedApi={api}
+              connectionLost={connectionLost}
+              isWorkspaceEditor={isWorkspaceEditor}
+            />
+          </Toasty>
+        </TooltipProvider>
+      </FeatureFlagsProvider>
+    </AuthProvider>
+  )
+
   // Loading state
   if (isLoading && !standalone) {
+    const kept = settled.current
+    if (kept?.kind === 'shell') return renderShell(kept.api)
+    if (kept?.kind === 'standalone' && (isBlueprint || isSignup)) return renderStandalone()
     return (
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
         {connectionLost && <ConnectionLostBanner />}
@@ -76,6 +111,7 @@ function RootComponent() {
 
   // Auth error
   if (error && !standalone) {
+    settled.current = null
     return (
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base p-6">
         <p className="text-sm text-kumo-danger">Authentication error: {error}</p>
@@ -91,6 +127,7 @@ function RootComponent() {
 
   // Externally managed identity: wait for confirmed native admission.
   if (!isAuthenticated && externallyManaged && !standalone) {
+    settled.current = null
     return (
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
         <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
@@ -101,41 +138,22 @@ function RootComponent() {
 
   // Not authenticated and not a public route — show login
   if (!isAuthenticated && !standalone) {
+    settled.current = null
     return <LoginPage rpcStub={rpcStub} onLoginSuccess={handleLoginSuccess} />
   }
 
   // Signed-out visitors of public routes render without the auth wrapper / app shell.
   if (standalone) {
-    const showHeader = !isSignup
-    return (
-      <TooltipProvider>
-        <Toasty>
-          {showHeader && <Header />}
-          <Outlet />
-        </Toasty>
-      </TooltipProvider>
-    )
+    settled.current = { kind: 'standalone' }
+    return renderStandalone()
   }
 
   // Authenticated — render the full shell (with onboarding gate)
   // authenticatedApi is guaranteed non-null here: isLoading, error, and
   // !isAuthenticated branches all return early above.
   if (!authenticatedApi) return null
-  return (
-    <AuthProvider authenticatedApi={authenticatedApi} onLogout={logout}>
-      <FeatureFlagsProvider>
-        <TooltipProvider>
-          <Toasty>
-            <AuthenticatedShell
-              authenticatedApi={authenticatedApi}
-              connectionLost={connectionLost}
-              isWorkspaceEditor={isWorkspaceEditor}
-            />
-          </Toasty>
-        </TooltipProvider>
-      </FeatureFlagsProvider>
-    </AuthProvider>
-  )
+  settled.current = { kind: 'shell', api: authenticatedApi }
+  return renderShell(authenticatedApi)
 }
 
 /**

@@ -6,7 +6,7 @@ import type { RpcStub } from 'capnweb'
 import type { PublicApi, AuthenticatedApi, ServerConfig } from '@gadgets/workshop-shared/api'
 vi.stubEnv('VITE_CF_ACCESS_MODE', 'true')
 const config = vi.hoisted(() => ({} as ServerConfig))
-vi.mock('./ServerConfigContext', () => ({ useServerConfig: () => config, useServerConfigError: () => false }))
+vi.mock('./ServerConfigContext', () => ({ useConnectionConfig: () => config, useServerConfigError: () => false }))
 const { useAuth } = await import('./useAuth')
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 

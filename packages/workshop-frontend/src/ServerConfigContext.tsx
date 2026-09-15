@@ -1,14 +1,24 @@
 import { createContext, useContext } from 'react'
 import { ServerConfig, AuthVendorInfo, resolveSiteName } from '@gadgets/workshop-shared/api'
 
-// Deployment-level configuration fetched once at boot via PublicApi.getServerConfig().
-// `null` while still loading.
+// Deployment-level configuration fetched via PublicApi.getServerConfig(). `null` while still
+// loading. While a replacement connection (after a disconnect) is still answering, this carries
+// the last known configuration so the page keeps its name, logo and accent instead of falling
+// back to defaults for a moment.
 export const ServerConfigContext = createContext<ServerConfig | null>(null)
 export const ServerConfigErrorContext = createContext(false)
+// The configuration supplied by the CURRENT connection only, null until it has answered.
+// Authentication follows this one: an admission is proven against the connection that carries it.
+export const ConnectionConfigContext = createContext<ServerConfig | null>(null)
 
 // Returns the server config, or null while it is still loading.
 export function useServerConfig(): ServerConfig | null {
   return useContext(ServerConfigContext)
+}
+
+// Returns the current connection's own config, or null until that connection has answered.
+export function useConnectionConfig(): ServerConfig | null {
+  return useContext(ConnectionConfigContext)
 }
 
 // Returns whether the latest deployment-config request failed.

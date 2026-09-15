@@ -22,13 +22,18 @@ it('never uses stale configuration or a late reply for a replacement RPC root', 
     await React.act(async () => root.render(<View owner={second.owner} />))
     await React.act(async () => first.resolve({ externalAuthentication: { logoutUrl: '/wrong-session' } } as ServerConfig))
     expect(state.config).toBeNull()
+    expect(state.lastKnown).toBeNull()
     const currentConfig = { siteName: 'Current native server' } as ServerConfig
     await React.act(async () => second.resolve(currentConfig))
     expect(state.config).toBe(currentConfig)
+    expect(state.lastKnown).toBe(currentConfig)
     await React.act(async () => root.render(<View owner={third.owner} />))
     expect(state.config).toBeNull()
+    // The page keeps showing what it last knew while the replacement connection answers.
+    expect(state.lastKnown).toBe(currentConfig)
     await React.act(async () => third.reject(new Error('Disconnected')))
     expect(state.config).toBeNull()
     expect(state.error).toBe(true)
+    expect(state.lastKnown).toBe(currentConfig)
   } finally { await React.act(async () => root.unmount()); container.remove() }
 })

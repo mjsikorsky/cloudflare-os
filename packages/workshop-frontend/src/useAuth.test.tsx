@@ -8,7 +8,7 @@ import { useAuth } from './useAuth'
 import { externalLogoutUrl, externalLoginUrl } from './deploymentPaths'
 
 const fixture = vi.hoisted(() => ({ config: null as ServerConfig | null, error: false }))
-vi.mock('./ServerConfigContext', () => ({ useServerConfig: () => fixture.config, useServerConfigError: () => fixture.error }))
+vi.mock('./ServerConfigContext', () => ({ useConnectionConfig: () => fixture.config, useServerConfigError: () => fixture.error }))
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 // Isolated token storage; this suite tests admission lifecycle, not browser storage itself.
 const tokens = new Map<string, string>()

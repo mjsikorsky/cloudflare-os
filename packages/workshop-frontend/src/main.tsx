@@ -5,7 +5,7 @@ import { RouterProvider } from '@tanstack/react-router'
 import { RpcStub, newWebSocketRpcSession } from 'capnweb'
 import { PublicApi } from '@gadgets/workshop-shared/api'
 import { RpcContext } from './RpcContext'
-import { ServerConfigContext, ServerConfigErrorContext } from './ServerConfigContext'
+import { ServerConfigContext, ServerConfigErrorContext, ConnectionConfigContext } from './ServerConfigContext'
 import { ThemeProvider } from './ThemeContext'
 import { createRouter } from './router'
 import AnnouncementBanner from './components/AnnouncementBanner'
@@ -127,7 +127,10 @@ function AppWithConnection() {
     stub: currentStub,
     connectionLost: isConnectionLost,
   });
-  const { config: serverConfig, error: serverConfigError } = useServerConfigConnection(rpcState.stub);
+  const { config: connectionConfig, error: serverConfigError, lastKnown } = useServerConfigConnection(rpcState.stub);
+  // What the page shows follows the last configuration any connection supplied; a replacement
+  // connection after a disconnect must not blank the site name, logo or accent while it answers.
+  const serverConfig = connectionConfig ?? lastKnown;
 
   useEffect(() => {
     let cb = () => setRpcState({ stub: currentStub, connectionLost: isConnectionLost });
@@ -149,8 +152,10 @@ function AppWithConnection() {
       <RpcContext.Provider value={rpcState}>
         <ServerConfigErrorContext.Provider value={serverConfigError}>
           <ServerConfigContext.Provider value={serverConfig}>
-            <AnnouncementBanner />
-            <RouterProvider router={router} />
+            <ConnectionConfigContext.Provider value={connectionConfig}>
+              <AnnouncementBanner />
+              <RouterProvider router={router} />
+            </ConnectionConfigContext.Provider>
           </ServerConfigContext.Provider>
         </ServerConfigErrorContext.Provider>
       </RpcContext.Provider>
