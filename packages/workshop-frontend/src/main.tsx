@@ -9,7 +9,7 @@ import { ServerConfigContext, ServerConfigErrorContext, ConnectionConfigContext 
 import { ThemeProvider } from './ThemeContext'
 import { createRouter } from './router'
 import AnnouncementBanner from './components/AnnouncementBanner'
-import { applyAccentColor, applyStoredThemeMode } from './theme'
+import { applyAccentColor, applyStoredAccentColor, applyStoredThemeMode, writeStoredAccentColor } from './theme'
 import './styles.css'
 import FrontendErrorBoundary from './FrontendErrorBoundary'
 import { installWorkshopErrorReporting, reportIssue } from './errorReporting'
@@ -121,6 +121,7 @@ currentStub.onRpcBroken(handleBroken);
 
 const router = createRouter()
 applyStoredThemeMode()
+applyStoredAccentColor()
 
 function AppWithConnection() {
   const [rpcState, setRpcState] = useState<{stub: RpcStub<PublicApi>; connectionLost: boolean}>({
@@ -138,10 +139,14 @@ function AppWithConnection() {
     return () => { notifyCurrentStubUpdated.delete(cb); };
   }, []);
 
-  // Apply the deployment's admin-chosen accent color (overrides brand CSS vars at runtime).
+  // Apply the deployment's admin-chosen accent color (overrides brand CSS vars at runtime) once
+  // its configuration has arrived, and remember it for the next load's first paint. Before that
+  // the remembered accent stays in place.
   useEffect(() => {
-    applyAccentColor(serverConfig?.accentColor ?? '');
-  }, [serverConfig?.accentColor]);
+    if (!serverConfig) return;
+    applyAccentColor(serverConfig.accentColor ?? '');
+    writeStoredAccentColor(serverConfig.accentColor);
+  }, [serverConfig, serverConfig?.accentColor]);
 
   // The tab shows this deployment's name and mark only once its configuration has arrived; the
   // static page carries neither. A route that sets its own document title keeps it.

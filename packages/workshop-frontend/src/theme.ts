@@ -93,5 +93,33 @@ export function applyAccentColor(color: string | null | undefined): void {
   }
 }
 
+const ACCENT_COLOR_STORAGE_KEY = 'gadgets:accent-color'
+
+// The accent this browser last saw from this deployment's configuration, or null.
+export function readStoredAccentColor(): string | null {
+  try {
+    const stored = window.localStorage.getItem(ACCENT_COLOR_STORAGE_KEY)
+    return stored && isHexColor(stored) ? stored : null
+  } catch {
+    return null
+  }
+}
+
+// Remember the deployment's accent for the next load; an unset accent forgets it.
+export function writeStoredAccentColor(color: string | null | undefined): void {
+  try {
+    if (color && isHexColor(color)) window.localStorage.setItem(ACCENT_COLOR_STORAGE_KEY, color)
+    else window.localStorage.removeItem(ACCENT_COLOR_STORAGE_KEY)
+  } catch {
+    // Ignore storage failures; the accent still applies once configuration arrives.
+  }
+}
+
+// Apply the remembered accent before the deployment's configuration has arrived, so a returning
+// visitor never sees the base accent on the first paint. Configuration replaces it when it lands.
+export function applyStoredAccentColor(): void {
+  applyAccentColor(readStoredAccentColor())
+}
+
 // The base/default accent, shown in the admin picker when no custom color is set.
 export const DEFAULT_ACCENT_COLOR = '#ff4801'

@@ -13,6 +13,7 @@ import AppShell from '../components/AppShell/AppShell'
 import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
+import { readStoredAccentColor } from '../theme'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -101,10 +102,14 @@ function RootComponent() {
     const kept = settled.current
     if (kept?.kind === 'shell') return renderShell(kept.api)
     if (kept?.kind === 'standalone' && (isBlueprint || isSignup)) return renderStandalone()
+    // The one render that can precede the deployment's configuration. A returning visitor has
+    // the remembered accent (applyStoredAccentColor) and sees it here; a first visit shows no
+    // brand color at all rather than the base accent, which is not this deployment's.
+    const accent = readStoredAccentColor() !== null
     return (
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
         {connectionLost && <ConnectionLostBanner />}
-        <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
+        <div className={`w-8 h-8 border-2 border-t-transparent rounded-full animate-spin ${accent ? 'border-kumo-brand' : 'border-current text-kumo-subtle'}`} />
         <p className="text-sm text-kumo-subtle">{connectionLost ? 'Waiting for server…' : 'Loading...'}</p>
       </div>
     )
