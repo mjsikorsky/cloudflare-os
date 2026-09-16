@@ -22,7 +22,7 @@ import { BlueprintKvRecord, buildBlueprintArchiveStream, sanitizeBlueprintOutput
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { ExternalMessageGateway } from "./external-message-gateway";
-import { RpcStub as NativeRpcStub } from "cloudflare:workers";
+import { DurableObject, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
@@ -66,6 +66,12 @@ export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback,
 // Re-export service-binding entrypoint for external channel integrations.
 export { ExternalMessageGateway };
 
+/** The runtime context a request handler runs in: a Worker invocation's ExecutionContext or a
+ * Durable Object's DurableObjectState. The handlers use only what both provide (`exports`,
+ * `waitUntil`; analytics already accepts either), so the same code serves a request whether it
+ * arrives in the stateless Worker or inside a ConnectionDurableObject. */
+export type HostContext = ExecutionContext | DurableObjectState;
+
 // Declare optional environment variables here since they may be omitted from wrangler.jsonc.
 type Env = Cloudflare.Env & {
   // Set these if using Cloudflare Access for authentication, otherwise username/password is used.
@@ -79,7 +85,7 @@ type Env = Cloudflare.Env & {
 
 @validateRpc()
 class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
-  constructor(private ctx: ExecutionContext, private env: Env,
+  constructor(private ctx: HostContext, private env: Env,
       private user: DurableObjectStub<UserDurableObject>,
       private abortSession: (reason: Error) => void) {
     super();
@@ -630,7 +636,7 @@ class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
 class PublicApiImpl extends RpcTarget implements PublicApi {
   users: DurableObjectNamespace<UserDurableObject>;
 
-  constructor(private ctx: ExecutionContext, private env: Env,
+  constructor(private ctx: HostContext, private env: Env,
       private abortSession: (reason: Error) => void,
       private accessPayload?: JWTPayload,
       private externalIdentity?: ExternalAdmissionSeat,
@@ -965,7 +971,7 @@ class VerifierRootImpl extends RpcTarget {
  * or serialized HTTP headers. Revalidation keeps the same native connection and account alive.
  */
 export async function fetchWithIdentity(
-    req: Request, env: Env, ctx: ExecutionContext, identity: ExternalIdentity,
+    req: Request, env: Env, ctx: HostContext, identity: ExternalIdentity,
     authority?: ExternalConnectionAuthority): Promise<Response> {
   const admission = validateExternalIdentity(identity, req.url);
   if (isVerifierIdentityId(admission.id)) throw new Error("A verifier identity cannot hold an account.");
@@ -977,7 +983,7 @@ export async function fetchWithIdentity(
  * sign-in method is refused and the UI is sent to the host's own sign-in page.
  */
 export async function fetchAsVisitor(
-    req: Request, env: Env, ctx: ExecutionContext, visitor: ExternalVisitor): Promise<Response> {
+    req: Request, env: Env, ctx: HostContext, visitor: ExternalVisitor): Promise<Response> {
   const admission = validateExternalVisitor(visitor, req.url);
   return handleRequest(req, env, ctx, undefined, undefined, undefined, admission);
 }
@@ -986,7 +992,7 @@ export async function fetchAsVisitor(
  * Account and workspace parents stay inside this native server; clients cannot select another
  * resource, change identity or access the full account API through this connection.
  */
-export async function fetchWithContribution(req: Request, env: Env, ctx: ExecutionContext,
+export async function fetchWithContribution(req: Request, env: Env, ctx: HostContext,
     identity: ExternalIdentity, target: ExternalContributionTarget,
     authority?: ExternalConnectionAuthority): Promise<Response> {
   const url = new URL(req.url);
@@ -1007,7 +1013,7 @@ export async function fetchWithContribution(req: Request, env: Env, ctx: Executi
  * the grant (up to VERIFIER_ADMISSION_MAX_MS) with no host re-check: a revoked grant is refused at
  * the verifier's next open, exactly as for any other collaborator.
  */
-export async function fetchAsVerifier(req: Request, env: Env, ctx: ExecutionContext,
+export async function fetchAsVerifier(req: Request, env: Env, ctx: HostContext,
     identity: ExternalIdentity, target: ExternalVerifierTarget): Promise<Response> {
   const url = new URL(req.url);
   if (url.pathname !== "/api" || url.search || req.method !== "GET") {
@@ -1019,7 +1025,7 @@ export async function fetchAsVerifier(req: Request, env: Env, ctx: ExecutionCont
   return handleRequest(req, env, ctx, admission, undefined, undefined, undefined, verifier);
 }
 
-async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
+async function handleRequest(req: Request, env: Env, ctx: HostContext,
     externalIdentity?: Readonly<ExternalIdentity>, authority?: ExternalConnectionAuthority,
     externalContribution?: Readonly<ExternalContributionTarget>,
     externalVisitor?: Readonly<ExternalVisitor>,
@@ -1203,3 +1209,26 @@ async function handleRequest(req: Request, env: Env, ctx: ExecutionContext,
 }
 
 export default {fetch: handleRequest} satisfies ExportedHandler<Env>;
+
+/** A durable home for one browser RPC connection.
+ *
+ * A WebSocket served straight from the stateless Worker lives exactly as long as that Worker
+ * request, which the runtime may end at any time (load shedding); every Cap'n Web session on it —
+ * its exports, pending calls, the admission seat and the opened workspace — dies with it, and the
+ * browser reconnects. Serving the same request from inside a Durable Object gives the connection
+ * the durability class of the workspace and account it speaks to: the object stays resident for
+ * as long as its socket is open.
+ *
+ * The handler is `handleRequest` unchanged — a DurableObjectState offers the same `exports` and
+ * `waitUntil` a Worker context does (HostContext). The host that deploys this Worker decides
+ * whether browser connections terminate here (by forwarding `/api` upgrades to a fresh instance)
+ * or in the Worker, and applies its admission wrapper to this object's `fetch` exactly as to the
+ * default export; nothing here knows or checks who the caller is. One instance serves one
+ * connection: hosts create it with `newUniqueId()` and never route a second request to it.
+ * Cap'n Web sessions keep their state in memory, so this object never hibernates.
+ */
+export class ConnectionDurableObject extends DurableObject<Env> {
+  fetch(req: Request): Promise<Response> {
+    return handleRequest(req, this.env, this.ctx);
+  }
+}

@@ -56,6 +56,12 @@
       // login back to the waiting browser.
       "tag": "v2",
       "new_sqlite_classes": [ "PendingLogin" ]
+    },
+    {
+      // A durable home for one browser RPC connection, for hosts that terminate `/api` WebSockets
+      // in a Durable Object instead of the stateless Worker (see ConnectionDurableObject).
+      "tag": "v3",
+      "new_sqlite_classes": [ "ConnectionDurableObject" ]
     }
   ],
 
