@@ -199,19 +199,74 @@ describe('ShareModal', () => {
     return container
   }
 
-  it('offers the host guest-link page for this gadget only when the host provides one', async () => {
-    const without = await render(fakeOverseer())
-    expect(without.querySelector('a[href*="guest-links"]')).toBeNull()
-    act(() => root?.unmount())
-    without.remove()
+  describe('guest links (host-owned)', () => {
+    const host = { api: '/legion/api/guest-links', page: '/guest-links' }
+    const config = { externalAuthentication: { logoutUrl: '/sign-out', guestLinks: host } } as unknown as ServerConfig
+    const originalFetch = globalThis.fetch
+    let calls: Array<{ url: string; init?: RequestInit }>
+    let links: Array<{ linkId: string; title: string; url: string; createdAt: number; expiresAt: number | null; revokedAt: number | null }>
+    beforeEach(() => {
+      calls = []
+      links = []
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        calls.push({ url, init })
+        const path = new URL(url).pathname
+        if (init?.method === 'POST' && path === host.api) {
+          const body = JSON.parse(String(init.body))
+          if (body.gadgetId !== 'trip-planner') return Response.json({ error: "You don't have access to this workspace." }, { status: 409 })
+          const link = { linkId: 'a'.repeat(32), title: body.title || 'Guest link', url: `${window.location.origin}/open/${'a'.repeat(32)}`, createdAt: 1, expiresAt: body.until === 'stop' ? null : Date.now() + 3_600_000, revokedAt: null }
+          links = [link, ...links]
+          return Response.json({ linkId: link.linkId, url: link.url, title: link.title, expiresAt: link.expiresAt })
+        }
+        if (init?.method === 'POST' && path === `${host.api}/${'a'.repeat(32)}/stop`) {
+          links = links.map(l => l.linkId === 'a'.repeat(32) ? { ...l, revokedAt: 2 } : l)
+          return Response.json({ linkId: 'a'.repeat(32), revokedAt: 2 })
+        }
+        if (!init?.method && path === host.api) return Response.json({ links })
+        return Response.json({ error: 'Not found.' }, { status: 404 })
+      }) as typeof fetch
+    })
+    afterEach(() => { globalThis.fetch = originalFetch })
 
-    const config = { externalAuthentication: { logoutUrl: '/sign-out', guestLinkUrl: '/guest-links' } } as ServerConfig
-    const rendered = await render(fakeOverseer(), config)
-    const anchor = rendered.querySelector<HTMLAnchorElement>('a[href*="guest-links"]')
-    expect(anchor?.textContent?.trim()).toBe('Guest link…')
-    expect(anchor?.getAttribute('href')).toBe(`${window.location.origin}/guest-links?gadget=trip-planner`)
-    expect(anchor?.getAttribute('target')).toBe('_blank')
-    expect(anchor?.getAttribute('rel')).toBe('noopener')
+    it('shows nothing about guests when the host offers no guest links', async () => {
+      const rendered = await render(fakeOverseer())
+      expect(rendered.textContent).not.toContain('Guest link')
+      expect(calls).toEqual([])
+    })
+
+    it('mints, lists, copies and stops a guest link inside the dialog, through the host API as the person', async () => {
+      const rendered = await render(fakeOverseer(), config)
+      expect(calls[0]?.url).toBe(`${window.location.origin}${host.api}?gadget=trip-planner`)
+      expect(calls[0]?.init?.credentials).toBe('same-origin')
+      expect(rendered.textContent).not.toContain('Guest links')
+
+      await click(button(rendered, 'Guest link…'))
+      const name = rendered.querySelector<HTMLInputElement>('input[aria-label="Guest link name (optional)"]')!
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+      await act(async () => { setValue.call(name, 'Board night'); name.dispatchEvent(new Event('input', { bubbles: true })) })
+      await click(button(rendered, 'Create guest link'))
+      await act(async () => { await Promise.resolve() })
+
+      const create = calls.find(c => c.init?.method === 'POST')!
+      expect(create.url).toBe(`${window.location.origin}${host.api}`)
+      expect(JSON.parse(String(create.init?.body))).toEqual({ gadgetId: 'trip-planner', title: 'Board night', until: 'stop' })
+      expect(rendered.textContent).toContain('Guest link ready')
+      expect(rendered.textContent).toContain(`/open/${'a'.repeat(32)}`)
+      expect(rendered.textContent).toContain('Guest links')
+      expect(rendered.textContent).toContain('Until you stop it')
+      expect(rendered.querySelector('a[href*="/guest-links"]')?.textContent).toBe('All your guest links')
+
+      await click(button(rendered, 'Copy'))
+      expect(copyToClipboard).toHaveBeenCalledWith(`${window.location.origin}/open/${'a'.repeat(32)}`)
+
+      await click(button(rendered, 'Stop Board night'))
+      await click(button(rendered, 'Stop'))
+      await act(async () => { await Promise.resolve() })
+      expect(calls.some(c => c.url.endsWith(`/${'a'.repeat(32)}/stop`) && c.init?.method === 'POST')).toBe(true)
+      expect(rendered.textContent).not.toContain('Guest links')
+      expect(rendered.textContent).not.toContain('Guest link ready')
+    })
   })
 
   it('reveals the workspace link to send after a direct invite', async () => {

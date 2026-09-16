@@ -29,16 +29,20 @@ describe("host identity admission", () => {
     expect(validateExternalIdentity({...admission, logoutUrl: "/sign-out?from=workshop"},
       "https://host.example/workshop/api", now).logoutUrl).toBe("/sign-out?from=workshop");
   });
-  it("carries the host's guest-link page only when offered, as a host-origin path", () => {
-    expect("guestLinkUrl" in validateExternalIdentity(admission, "https://host.example/api", now)).toBe(false);
-    expect(validateExternalIdentity({...admission, guestLinkUrl: "/guest-links"},
-      "https://host.example/workshop/api", now).guestLinkUrl).toBe("/guest-links");
-    expect(validateExternalIdentity({...admission, guestLinkUrl: "https://host.example/guest-links?x=1"},
-      "https://host.example/workshop/api", now).guestLinkUrl).toBe("/guest-links?x=1");
+  it("carries the host's guest-link API and page only when offered, as host-origin paths", () => {
+    expect("guestLinks" in validateExternalIdentity(admission, "https://host.example/api", now)).toBe(false);
+    const result = validateExternalIdentity({...admission, guestLinks: {api: "/legion/api/guest-links", page: "https://host.example/guest-links?x=1"}},
+      "https://host.example/workshop/api", now);
+    expect(result.guestLinks).toEqual({api: "/legion/api/guest-links", page: "/guest-links?x=1"});
+    expect(Object.isFrozen(result.guestLinks)).toBe(true);
   });
   it.each(["//attacker.example/guest-links", "https://attacker.example/guest-links", "javascript:alert(1)",
-    "https://user:password@host.example/guest-links", "", null, 123, {}])("refuses an unsafe guest-link page %s", guestLinkUrl => {
-    expect(() => validateExternalIdentity({...admission, guestLinkUrl} as never, "https://host.example", now)).toThrow();
+    "https://user:password@host.example/guest-links", "", null, 123, {}])("refuses an unsafe guest-link path %s", bad => {
+    expect(() => validateExternalIdentity({...admission, guestLinks: {api: bad, page: "/guest-links"}} as never, "https://host.example", now)).toThrow();
+    expect(() => validateExternalIdentity({...admission, guestLinks: {api: "/legion/api/guest-links", page: bad}} as never, "https://host.example", now)).toThrow();
+  });
+  it.each([null, "x", 1, {}, {api: "/a"}, {page: "/p"}])("refuses a malformed guest-link host %s", guestLinks => {
+    expect(() => validateExternalIdentity({...admission, guestLinks} as never, "https://host.example", now)).toThrow();
   });
 });
 

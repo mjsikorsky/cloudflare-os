@@ -80,7 +80,7 @@ export class ExternalAdmissionSeat {
       const next = validateExternalIdentity(result.identity, this.requestUrl, Date.now(), this.maxLifetimeMs);
       if (result.scope !== this.#scope || next.id !== previous.id ||
           next.name !== previous.name || next.logoutUrl !== previous.logoutUrl ||
-          next.guestLinkUrl !== previous.guestLinkUrl) {
+          next.guestLinks?.api !== previous.guestLinks?.api || next.guestLinks?.page !== previous.guestLinks?.page) {
         throw new Error("External authority changed.");
       }
       this.#identity = next;

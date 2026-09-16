@@ -11,9 +11,9 @@ export interface ExternalIdentity {
   expiresAt: number;
   /** Same-origin host sign-out page, reached by a top-level navigation. */
   logoutUrl: string;
-  /** Optional same-origin host page that opens a gadget to guests (the host appends nothing; the
-   * UI adds `?gadget=<id>`). Absent when the host offers no guest links on this connection. */
-  guestLinkUrl?: string;
+  /** Optional: where the host keeps guest links for this person (its same-origin API and page).
+   * Absent when the host offers no guest links on this connection. */
+  guestLinks?: { api: string; page: string };
 }
 
 /** A signed-out visitor admitted by a trusted embedding host to the public surface only
@@ -50,7 +50,7 @@ export function validateExternalIdentity(
     maxLifetimeMs = IDENTITY_ADMISSION_MAX_MS): Readonly<ExternalIdentity> {
   if (!identity || typeof identity.id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9@._+-]{0,255}$/.test(identity.id)
       || typeof identity.logoutUrl !== "string" || !identity.logoutUrl.trim()
-      || (identity.guestLinkUrl !== undefined && typeof identity.guestLinkUrl !== "string")
+      || (identity.guestLinks !== undefined && (!identity.guestLinks || typeof identity.guestLinks !== "object"))
       || typeof identity.name !== "string" || !identity.name.trim() || identity.name.length > 200
       || !Number.isSafeInteger(identity.expiresAt) || identity.expiresAt <= now
       || identity.expiresAt > now + maxLifetimeMs) {
@@ -58,8 +58,9 @@ export function validateExternalIdentity(
   }
   return Object.freeze({ id: identity.id, name: identity.name,
     expiresAt: identity.expiresAt, logoutUrl: hostPath(identity.logoutUrl, requestUrl, "sign-out"),
-    ...(identity.guestLinkUrl === undefined ? {}
-        : { guestLinkUrl: hostPath(identity.guestLinkUrl, requestUrl, "guest link") }) });
+    ...(identity.guestLinks === undefined ? {}
+        : { guestLinks: Object.freeze({ api: hostPath(identity.guestLinks.api, requestUrl, "guest-link API"),
+            page: hostPath(identity.guestLinks.page, requestUrl, "guest-link page") }) }) });
 }
 
 /** Validate and snapshot a host visitor admission before exposing the public RPC surface. */

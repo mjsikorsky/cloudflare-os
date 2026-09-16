@@ -861,6 +861,14 @@ export interface ExternalAgentLaunch {
   actionUrl: string;
 }
 
+/** Where an embedding host keeps guest links (people who use a gadget live, without an account):
+ * both are same-origin paths on the host. */
+export type GuestLinksHost = { api: string; page: string };
+
+/** One guest link as the host's API reports it. `url` is what a guest receives; `expiresAt` null
+ * means "until stopped"; `revokedAt` non-null means stopped. */
+export type GuestLinkInfo = { linkId: string; title: string; url: string; createdAt: number; expiresAt: number | null; revokedAt: number | null };
+
 // Deployment-level configuration that the client needs at boot to decide what UI to render.
 // Returned by `PublicApi.getServerConfig()`. Contains no secrets.
 export type ServerConfig = {
@@ -869,9 +877,11 @@ export type ServerConfig = {
   /** Present only on connections admitted by an embedding host. The host owns sign-out. On a
    * visitor connection (public surface, no host identity) `loginUrl` is the host's same-origin
    * sign-in page; the UI navigates there with the current location as `redirect_url`. On a
-   * person's connection `guestLinkUrl`, when the host offers one, is the host's same-origin page
-   * that opens a gadget to guests; the UI opens it with `?gadget=<id>` in a new tab. */
-  externalAuthentication?: { logoutUrl: string; loginUrl?: string; guestLinkUrl?: string };
+   * person's connection `guestLinks`, when the host offers them, names the host's same-origin
+   * guest-link API the Share dialog calls as this person (GET ?gadget=<id> → {links}, POST
+   * {gadgetId,title,until} → a link, POST <api>/<linkId>/stop) and the host's page listing all of
+   * the person's guest links. Native mints and holds nothing for a guest link. */
+  externalAuthentication?: { logoutUrl: string; loginUrl?: string; guestLinks?: GuestLinksHost };
   // Auth-capable, allowlisted gatekeeper vendors offered as sign-in methods. Empty when none are
   // configured (password-only).
   authVendors: AuthVendorInfo[];

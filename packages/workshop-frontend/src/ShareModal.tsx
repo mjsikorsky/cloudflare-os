@@ -2,7 +2,7 @@ import { workshopPath } from './deploymentPaths'
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { Checkbox, Dialog, DropdownMenu, useKumoToastManager } from '@cloudflare/kumo'
 import type { PortalContainer } from '@cloudflare/kumo'
-import { CaretDown, Check, Copy, Globe, Link, PencilSimple, ShieldCheck, ShieldWarning, Trash, UserPlus, X } from '@phosphor-icons/react'
+import { CaretDown, Check, Copy, Link, PencilSimple, ShieldCheck, ShieldWarning, Trash, UserPlus, X } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
 import {
   Overseer,
@@ -19,6 +19,7 @@ import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControl
 import { PersonAvatar } from './components/PersonAvatar'
 import { copyToClipboard } from './clipboard'
 import { useServerConfig } from './ServerConfigContext'
+import { GuestLinkComposer, GuestLinkList, useGuestLinks } from './GuestLinks'
 
 type CollaboratorRow =
   | { kind: 'owner'; profile: AiChatAuthorInfo }
@@ -375,14 +376,9 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   const isOwner = !metadata.owner
   const sharingProhibited = metadata.sharingProhibited === true
   // An embedding host may offer guest links: people who use this gadget live without signing in.
-  // The host's own page mints and stops them; this modal only opens that page for this gadget.
-  const guestLinkPage = useServerConfig()?.externalAuthentication?.guestLinkUrl
-  const guestLinkHref = useMemo(() => {
-    if (!guestLinkPage) return null
-    const url = new URL(guestLinkPage, window.location.origin)
-    url.searchParams.set('gadget', metadata.id)
-    return url.href
-  }, [guestLinkPage, metadata.id])
+  // The host mints, lists and stops them as this person over its own API; nothing here holds one.
+  const guestLinksHost = useServerConfig()?.externalAuthentication?.guestLinks
+  const guest = useGuestLinks(guestLinksHost, metadata.id)
 
   const loadData = useCallback(async () => {
     try {
@@ -948,18 +944,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                 <Link size={14} /> Create a share link
               </button>
             )}
-            {guestLinkHref && (
-              <a
-                href={guestLinkHref}
-                target="_blank"
-                rel="noopener"
-                aria-disabled={sharingProhibited || undefined}
-                onClick={sharingProhibited ? event => event.preventDefault() : undefined}
-                className="themed-compact-shadow mt-2 flex h-12 w-full cursor-pointer items-center justify-center gap-1.5 rounded-2xl border border-kumo-line/80 bg-kumo-base px-3 text-[13px] font-medium text-kumo-subtle transition-[background-color,color,transform] duration-150 ease-out hover:bg-kumo-elevated/60 hover:text-kumo-default active:scale-[0.99] aria-disabled:cursor-not-allowed aria-disabled:opacity-40"
-              >
-                <Globe size={14} /> Guest link…
-              </a>
-            )}
+            {guestLinksHost && <GuestLinkComposer guest={guest} disabled={sharingProhibited} />}
           </div>
           </div>
 
@@ -1145,6 +1130,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
               </div>
           </section>
           )}
+          {guestLinksHost && <GuestLinkList guest={guest} host={guestLinksHost} disabled={sharingProhibited} />}
           </>
           )}
         </div>
