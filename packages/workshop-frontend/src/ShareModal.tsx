@@ -1,8 +1,8 @@
 import { workshopPath } from './deploymentPaths'
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
-import { Checkbox, Dialog, DropdownMenu, useKumoToastManager } from '@cloudflare/kumo'
+import { Checkbox, Dialog, useKumoToastManager } from '@cloudflare/kumo'
 import type { PortalContainer } from '@cloudflare/kumo'
-import { CaretDown, Check, Copy, Link, PencilSimple, ShieldCheck, ShieldWarning, Trash, UserPlus, X } from '@phosphor-icons/react'
+import { Check, Copy, Link, PencilSimple, ShieldCheck, ShieldWarning, Trash, UserPlus, X } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
 import {
   Overseer,
@@ -16,6 +16,7 @@ import {
   ObserverBindingNeed,
 } from '@gadgets/workshop-shared/api'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
+import { ChoiceMenu, InlineConfirm } from './components/ShareControls'
 import { PersonAvatar } from './components/PersonAvatar'
 import { copyToClipboard } from './clipboard'
 import { useServerConfig } from './ServerConfigContext'
@@ -69,6 +70,8 @@ function roleLabel(role: CollaboratorRole | undefined): string {
 
 const ROLE_OPTIONS: CollaboratorRole[] = ['build', 'use']
 
+const ROLE_CHOICES = ROLE_OPTIONS.map(role => ({ value: role, label: roleLabel(role), description: ROLE_DESCRIPTIONS[role] }))
+
 function RoleMenu({
   value,
   onValueChange,
@@ -82,47 +85,7 @@ function RoleMenu({
   ariaLabel: string
   container?: PortalContainer
 }) {
-  return (
-    <DropdownMenu>
-      <DropdownMenu.Trigger
-        disabled={disabled}
-        render={
-          <button
-            type="button"
-            className="group inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-[12px] leading-4 font-medium text-kumo-subtle transition-[background-color,color,transform] duration-150 ease-out hover:bg-kumo-tint hover:text-kumo-default focus-visible:bg-kumo-tint focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.97] data-[popup-open]:bg-kumo-tint data-[popup-open]:text-kumo-default disabled:cursor-not-allowed disabled:opacity-40"
-            aria-label={ariaLabel}
-          >
-            {roleLabel(value)}
-            <CaretDown size={11} weight="bold" className="text-kumo-inactive transition-transform duration-150 ease-out group-data-[popup-open]:rotate-180" />
-          </button>
-        }
-      />
-      <DropdownMenu.Content
-        container={container}
-        align="end"
-        sideOffset={6}
-        className="themed-floating-shadow-lg !z-[1100] !w-[300px] !min-w-0 rounded-2xl border border-kumo-line/70 bg-kumo-base p-1 !ring-kumo-line"
-      >
-        {ROLE_OPTIONS.map(role => (
-          <DropdownMenu.Item
-            key={role}
-            onClick={() => onValueChange(role)}
-            className="!h-auto cursor-pointer rounded-xl !px-2.5 !py-2 text-kumo-default transition-colors data-highlighted:bg-kumo-tint/70"
-          >
-            <span className="min-w-0 flex-1">
-              <span className="block text-[12px] leading-4 font-medium">{roleLabel(role)}</span>
-              <span className="mt-0.5 block text-[11px] leading-4 font-normal text-kumo-subtle">
-                {ROLE_DESCRIPTIONS[role]}
-              </span>
-            </span>
-            <span className="ml-2 flex h-4 w-4 shrink-0 items-center justify-center">
-              {value === role && <Check size={13} weight="bold" className="text-kumo-brand" />}
-            </span>
-          </DropdownMenu.Item>
-        ))}
-      </DropdownMenu.Content>
-    </DropdownMenu>
-  )
+  return <ChoiceMenu value={value} options={ROLE_CHOICES} onValueChange={onValueChange} disabled={disabled} ariaLabel={ariaLabel} container={container} />
 }
 
 function RoleBadge({ role }: { role: CollaboratorRole | undefined }) {
@@ -137,48 +100,6 @@ function RoleBadge({ role }: { role: CollaboratorRole | undefined }) {
     >
       {roleLabel(role)}
     </span>
-  )
-}
-
-function InlineConfirm({
-  label,
-  busy,
-  busyLabel,
-  tone = 'danger',
-  onConfirm,
-  onCancel,
-}: {
-  label: string
-  busy: boolean
-  busyLabel?: string
-  tone?: 'danger' | 'brand'
-  onConfirm: () => void
-  onCancel: () => void
-}) {
-  return (
-    <div className="flex items-center gap-1 share-confirm-in">
-      <button
-        type="button"
-        onClick={onConfirm}
-        disabled={busy}
-        className={`inline-flex h-7 cursor-pointer items-center rounded-lg px-2.5 text-[12px] leading-4 font-medium tracking-[-0.1px] transition-[background-color,transform] duration-150 ease-out active:scale-[0.97] disabled:opacity-60 ${
-          tone === 'danger'
-            ? 'text-kumo-danger hover:bg-kumo-danger-tint'
-            : 'text-kumo-brand hover:bg-kumo-tint'
-        }`}
-      >
-        {busy ? (busyLabel ?? `${label}…`) : label}
-      </button>
-      <button
-        type="button"
-        onClick={onCancel}
-        disabled={busy}
-        aria-label="Cancel"
-        className="grid h-7 w-7 cursor-pointer place-items-center rounded-lg text-kumo-inactive transition-[background-color,color,transform] duration-150 ease-out hover:bg-kumo-tint hover:text-kumo-default active:scale-[0.96] disabled:opacity-60"
-      >
-        <X size={14} />
-      </button>
-    </div>
   )
 }
 
@@ -944,7 +865,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                 <Link size={14} /> Create a share link
               </button>
             )}
-            {guestLinksHost && <GuestLinkComposer guest={guest} disabled={sharingProhibited} />}
+            {guestLinksHost && <GuestLinkComposer guest={guest} disabled={sharingProhibited} container={menuContainer} />}
           </div>
           </div>
 

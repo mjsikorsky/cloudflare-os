@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Check, Copy, Globe, Trash, X } from '@phosphor-icons/react'
 import { useKumoToastManager } from '@cloudflare/kumo'
+import type { PortalContainer } from '@cloudflare/kumo'
 import type { GuestLinkInfo, GuestLinksHost } from '@gadgets/workshop-shared/api'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
+import { ChoiceMenu, InlineConfirm, type Choice } from './components/ShareControls'
 import { copyToClipboard } from './clipboard'
 
 /** Guest links: people who use a gadget live, without an account. The embedding host owns them —
@@ -10,8 +12,12 @@ import { copyToClipboard } from './clipboard'
  * host names in ServerConfig.externalAuthentication.guestLinks. This UI only calls that API with
  * the browser's own credentials and shows what comes back; nothing here holds a key. */
 
-export const GUEST_LINK_UNTIL: Array<[string, string]> = [
-  ['3h', 'For 3 hours'], ['24h', 'For 24 hours'], ['7d', 'For 7 days'], ['stop', 'Until I stop it'],
+type GuestLinkUntil = '3h' | '24h' | '7d' | 'stop'
+export const GUEST_LINK_UNTIL: ReadonlyArray<Choice<GuestLinkUntil>> = [
+  { value: '3h', label: 'For 3 hours', description: 'Guests are sent out after three hours.' },
+  { value: '24h', label: 'For 24 hours', description: 'Guests are sent out after a day.' },
+  { value: '7d', label: 'For 7 days', description: 'Guests are sent out after a week.' },
+  { value: 'stop', label: 'Until I stop it', description: 'Open until you stop the link here.' },
 ]
 
 function hostUrl(host: GuestLinksHost, gadgetId: string, suffix = ''): string {
@@ -101,10 +107,10 @@ type Composer = ReturnType<typeof useGuestLinks>
 
 /** The entry under "Create a share link": a row that expands into name + duration + Create, and
  * shows the guest URL to send once it exists. */
-export function GuestLinkComposer({ guest, disabled }: { guest: Composer; disabled: boolean }) {
+export function GuestLinkComposer({ guest, disabled, container }: { guest: Composer; disabled: boolean; container?: PortalContainer }) {
   const [open, setOpen] = useState(false)
   const [title, setTitle] = useState('')
-  const [until, setUntil] = useState('stop')
+  const [until, setUntil] = useState<GuestLinkUntil>('stop')
   const [copied, setCopied] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
   useEffect(() => { if (open && !guest.created) nameRef.current?.focus({ preventScroll: true }) }, [open, guest.created])
@@ -157,15 +163,14 @@ export function GuestLinkComposer({ guest, disabled }: { guest: Composer; disabl
           className="h-9 min-w-0 flex-1 border-0 bg-transparent p-0 text-[14px] leading-5 tracking-[-0.25px] text-kumo-default outline-none placeholder:text-kumo-inactive"
           disabled={guest.busy === 'create' || disabled}
         />
-        <select
-          aria-label="How long the guest link stays open"
+        <ChoiceMenu
+          ariaLabel="How long the guest link stays open"
           value={until}
-          onChange={e => setUntil(e.target.value)}
+          options={GUEST_LINK_UNTIL}
+          onValueChange={setUntil}
           disabled={guest.busy === 'create' || disabled}
-          className="h-8 shrink-0 rounded-lg border border-kumo-line bg-kumo-base px-2 text-[12px] leading-4 text-kumo-default outline-none"
-        >
-          {GUEST_LINK_UNTIL.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-        </select>
+          container={container}
+        />
         <WorkshopButton tone="primary" className="shrink-0 !rounded-xl" onClick={submit} disabled={guest.busy === 'create' || disabled}>
           {guest.busy === 'create' ? 'Creating…' : 'Create guest link'}
         </WorkshopButton>
@@ -209,16 +214,13 @@ export function GuestLinkList({ guest, host, disabled }: { guest: Composer; host
                 <p className="truncate text-[12px] leading-[15px] tracking-[-0.15px] text-kumo-subtle">{describeGuestLinkEnd(link)} · guests use it live, no sign-in</p>
               </div>
               {stopping === link.linkId ? (
-                <div className="flex items-center gap-1 share-confirm-in">
-                  <button type="button" onClick={() => confirmStop(link.linkId)} disabled={guest.busy === 'stop'}
-                    className="inline-flex h-7 cursor-pointer items-center rounded-lg px-2.5 text-[12px] leading-4 font-medium tracking-[-0.1px] text-kumo-danger transition-[background-color,transform] duration-150 ease-out hover:bg-kumo-danger-tint active:scale-[0.97] disabled:opacity-60">
-                    {guest.busy === 'stop' ? 'Stopping…' : 'Stop'}
-                  </button>
-                  <button type="button" onClick={() => setStopping(null)} disabled={guest.busy === 'stop'} aria-label="Cancel"
-                    className="grid h-7 w-7 cursor-pointer place-items-center rounded-lg text-kumo-inactive transition-[background-color,color,transform] duration-150 ease-out hover:bg-kumo-tint hover:text-kumo-default active:scale-[0.96] disabled:opacity-60">
-                    <X size={14} />
-                  </button>
-                </div>
+                <InlineConfirm
+                  label="Stop"
+                  busy={guest.busy === 'stop'}
+                  busyLabel="Stopping…"
+                  onConfirm={() => confirmStop(link.linkId)}
+                  onCancel={() => setStopping(null)}
+                />
               ) : (
                 <>
                   <WorkshopIconButton className="!h-7 !w-7" onClick={() => copy(link)} aria-label={`Copy ${link.title}`} disabled={disabled}>
