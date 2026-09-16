@@ -667,8 +667,9 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   async getServerConfig(): Promise<ServerConfig> {
     const config = await getServerConfig(this.env);
     if (this.externalIdentity) {
+      const {logoutUrl, guestLinkUrl} = this.externalIdentity.current();
       return {...config, passwordAuthEnabled: false, authVendors: [],
-        externalAuthentication: {logoutUrl: this.externalIdentity.current().logoutUrl}};
+        externalAuthentication: {logoutUrl, ...(guestLinkUrl === undefined ? {} : {guestLinkUrl})}};
     }
     if (this.externalVisitor) {
       return {...config, passwordAuthEnabled: false, authVendors: [],

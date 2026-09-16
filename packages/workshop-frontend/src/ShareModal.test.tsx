@@ -12,6 +12,7 @@ import type {
   GadgetMetadata,
   ObserverBindingNeed,
   Overseer,
+  ServerConfig,
   ShareLinkInfo,
 } from '@gadgets/workshop-shared/api'
 
@@ -69,6 +70,7 @@ const copyToClipboard = vi.fn<(text: string) => Promise<boolean>>(async () => tr
 vi.mock('./clipboard', () => ({ copyToClipboard: (text: string) => copyToClipboard(text) }))
 
 import ShareModal from './ShareModal'
+import { ServerConfigContext } from './ServerConfigContext'
 
 const METADATA = { id: 'trip-planner', title: 'Trip planner' } as GadgetMetadata
 const WORKSPACE_URL = `${window.location.origin}/workspace/trip-planner`
@@ -174,26 +176,43 @@ describe('ShareModal', () => {
     container = undefined
   })
 
-  async function render(overseer: RpcStub<Overseer>) {
+  async function render(overseer: RpcStub<Overseer>, serverConfig: ServerConfig | null = null) {
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
     await act(async () => {
       root!.render(
-        <ShareModal
-          open
-          onClose={() => {}}
-          overseer={overseer}
-          metadata={METADATA}
-          currentUser={CURRENT_USER}
-          authenticatedApi={fakeAuthenticatedApi}
-        />,
+        <ServerConfigContext.Provider value={serverConfig}>
+          <ShareModal
+            open
+            onClose={() => {}}
+            overseer={overseer}
+            metadata={METADATA}
+            currentUser={CURRENT_USER}
+            authenticatedApi={fakeAuthenticatedApi}
+          />
+        </ServerConfigContext.Provider>,
       )
     })
     // Let the load effects settle.
     await act(async () => { await Promise.resolve() })
     return container
   }
+
+  it('offers the host guest-link page for this gadget only when the host provides one', async () => {
+    const without = await render(fakeOverseer())
+    expect(without.querySelector('a[href*="guest-links"]')).toBeNull()
+    act(() => root?.unmount())
+    without.remove()
+
+    const config = { externalAuthentication: { logoutUrl: '/sign-out', guestLinkUrl: '/guest-links' } } as ServerConfig
+    const rendered = await render(fakeOverseer(), config)
+    const anchor = rendered.querySelector<HTMLAnchorElement>('a[href*="guest-links"]')
+    expect(anchor?.textContent?.trim()).toBe('Guest link…')
+    expect(anchor?.getAttribute('href')).toBe(`${window.location.origin}/guest-links?gadget=trip-planner`)
+    expect(anchor?.getAttribute('target')).toBe('_blank')
+    expect(anchor?.getAttribute('rel')).toBe('noopener')
+  })
 
   it('reveals the workspace link to send after a direct invite', async () => {
     const rendered = await render(fakeOverseer())

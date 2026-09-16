@@ -79,7 +79,8 @@ export class ExternalAdmissionSeat {
       if (!result) throw new Error("External authority denied.");
       const next = validateExternalIdentity(result.identity, this.requestUrl, Date.now(), this.maxLifetimeMs);
       if (result.scope !== this.#scope || next.id !== previous.id ||
-          next.name !== previous.name || next.logoutUrl !== previous.logoutUrl) {
+          next.name !== previous.name || next.logoutUrl !== previous.logoutUrl ||
+          next.guestLinkUrl !== previous.guestLinkUrl) {
         throw new Error("External authority changed.");
       }
       this.#identity = next;

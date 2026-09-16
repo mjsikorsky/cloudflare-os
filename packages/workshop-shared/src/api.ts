@@ -868,8 +868,10 @@ export type ServerConfig = {
   externalAgentLaunch?: ExternalAgentLaunch;
   /** Present only on connections admitted by an embedding host. The host owns sign-out. On a
    * visitor connection (public surface, no host identity) `loginUrl` is the host's same-origin
-   * sign-in page; the UI navigates there with the current location as `redirect_url`. */
-  externalAuthentication?: { logoutUrl: string; loginUrl?: string };
+   * sign-in page; the UI navigates there with the current location as `redirect_url`. On a
+   * person's connection `guestLinkUrl`, when the host offers one, is the host's same-origin page
+   * that opens a gadget to guests; the UI opens it with `?gadget=<id>` in a new tab. */
+  externalAuthentication?: { logoutUrl: string; loginUrl?: string; guestLinkUrl?: string };
   // Auth-capable, allowlisted gatekeeper vendors offered as sign-in methods. Empty when none are
   // configured (password-only).
   authVendors: AuthVendorInfo[];

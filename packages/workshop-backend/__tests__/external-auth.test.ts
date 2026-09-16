@@ -29,6 +29,17 @@ describe("host identity admission", () => {
     expect(validateExternalIdentity({...admission, logoutUrl: "/sign-out?from=workshop"},
       "https://host.example/workshop/api", now).logoutUrl).toBe("/sign-out?from=workshop");
   });
+  it("carries the host's guest-link page only when offered, as a host-origin path", () => {
+    expect("guestLinkUrl" in validateExternalIdentity(admission, "https://host.example/api", now)).toBe(false);
+    expect(validateExternalIdentity({...admission, guestLinkUrl: "/guest-links"},
+      "https://host.example/workshop/api", now).guestLinkUrl).toBe("/guest-links");
+    expect(validateExternalIdentity({...admission, guestLinkUrl: "https://host.example/guest-links?x=1"},
+      "https://host.example/workshop/api", now).guestLinkUrl).toBe("/guest-links?x=1");
+  });
+  it.each(["//attacker.example/guest-links", "https://attacker.example/guest-links", "javascript:alert(1)",
+    "https://user:password@host.example/guest-links", "", null, 123, {}])("refuses an unsafe guest-link page %s", guestLinkUrl => {
+    expect(() => validateExternalIdentity({...admission, guestLinkUrl} as never, "https://host.example", now)).toThrow();
+  });
 });
 
 const visitor = {loginUrl: "/login", logoutUrl: "/sign-out"};
