@@ -1,5 +1,6 @@
 import { before, after, afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { mkdtempSync, realpathSync } from 'node:fs';
@@ -72,6 +73,7 @@ before(async () => {
       .map(className => [className, {className, useSQLite: true}])),
     kvNamespaces: ['BLUEPRINTS', 'AVATARS'], r2Buckets: ['BLUEPRINT_CONTENT'],
     bindings: {PUBLIC_BASE_URL: 'https://workshop.invalid'},
+    workerLoaders: {LOADER: {}},
     // This fixture invokes no model, gatekeeper, browser, Loader or provider operation.
   });
 }, {timeout: 120000});
@@ -292,4 +294,119 @@ test('native sharing revocation closes the machine root although its host author
   assert.equal((await machine.contribution.getInfo()).workspaceId, id);
   await workspace.removeCollaborator(other.name, []);
   await eventuallyRejected(() => machine.contribution.observe());
+});
+
+
+test('native composition saves fence slots, retain retry receipts and validate accepted proposals', {timeout: 30000}, async () => {
+  const owner = await person();
+  const workspace = retain(await owner.account.newGadget());
+  const gadget = retain(await workspace.createGadget('Original canvas'));
+  const gadgetId = await gadget.getId();
+  const nativeSource = new Y.Doc();
+  const files = nativeSource.getMap(String(gadgetId));
+  files.set('server.js', new Y.Text(`import {DurableObject} from 'cloudflare:workers';
+    export class Gadget extends DurableObject { identity = crypto.randomUUID(); read() {return this.identity;} }`));
+  files.set('client.js', new Y.Text('document.body.textContent = "Original native view"'));
+  await workspace.updateCode(Y.encodeStateAsUpdateV2(nativeSource));
+  nativeSource.destroy();
+  const originalBundle = await gadget.getUiBundle();
+  const originalFacet = retain(await gadget.connectToGadget(undefined, originalBundle.identity));
+  const originalFacetId = await originalFacet.read();
+  const composition = retain(await workspace.initializeComposition(gadgetId, [
+    {id: 'world', path: 'legion/state/world.json', serializerId: 'json/1', bytes: '{"nodes":[]}'},
+    {id: 'decor', path: 'legion/state/decor.json', serializerId: 'json/1', bytes: null},
+  ]));
+  const protocol = await composition.compositionProtocol();
+  assert.equal(protocol.writesEnabled, false, 'Registration is not activation');
+  const initial = await composition.readComposition();
+  const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+  const change = (state, id, bytes) => ({slotId: id, expected: state.slots.find(slot => slot.id === id).token,
+    next: bytes === null ? null : {bytes, digest: digest(bytes)}});
+  const request = {protocol: 2, operationId: crypto.randomUUID(), changes: [change(initial, 'world', '{"nodes":[1]}')]};
+  await assert.rejects(Promise.resolve(composition.applyCompositionChanges(request)), /disabled/);
+  await workspace.setCompositionWritesEnabled(gadgetId, protocol, true);
+  const committed = await composition.applyCompositionChanges(request);
+  assert.equal(committed.state, 'committed');
+  assert.deepEqual(await composition.applyCompositionChanges(request), committed);
+  assert.deepEqual(await composition.readCompositionOperation(request.operationId), committed);
+  await assert.rejects(Promise.resolve(composition.applyCompositionChanges({...request, changes: [change(initial, 'world', '{}')]})), /reused/);
+  const conflict = await composition.applyCompositionChanges({...request, operationId: crypto.randomUUID()});
+  assert.equal(conflict.state, 'rejected');
+  const independent = await composition.applyCompositionChanges({protocol: 2, operationId: crypto.randomUUID(), changes: [change(initial, 'decor', '{"color":"red"}')]});
+  assert.equal(independent.state, 'committed', 'Unchanged independent-slot token still works');
+  const beforeInvalid = await composition.readComposition();
+  const invalid = await composition.applyCompositionChanges({protocol: 2, operationId: crypto.randomUUID(), changes: [
+    change(beforeInvalid, 'world', '{"nodes":[2]}'), change(beforeInvalid, 'decor', '{'),
+  ]});
+  assert.equal(invalid.state, 'rejected');
+  assert.deepEqual(await composition.readComposition(), beforeInvalid, 'Atomic failed save rolls back source, guards and epoch');
+  const deleted = await composition.applyCompositionChanges({protocol: 2, operationId: crypto.randomUUID(), changes: [change(beforeInvalid, 'decor', null)]});
+  assert.equal(deleted.state, 'committed');
+  const tombstoned = await composition.readComposition();
+  assert.equal(tombstoned.slots.find(slot => slot.id === 'decor').bytes, null);
+  assert.equal((await composition.applyCompositionChanges({protocol: 2, operationId: crypto.randomUUID(), changes: [change(initial, 'decor', '{}')]})).state, 'rejected');
+  assert.equal((await composition.applyCompositionChanges({protocol: 2, operationId: crypto.randomUUID(), changes: [change(tombstoned, 'decor', '{}')]})).state, 'committed');
+
+  const chat = await workspace.newChat('Native composition proposal', null);
+  const agent = retain(await workspace.createContribution(chat, author));
+  const observed = await agent.observe();
+  const root = observed.workpieces.find(item => item.id === gadgetId).filesRoot;
+  const doc = new Y.Doc();
+  Y.applyUpdateV2(doc, observed.update);
+  const before = Y.encodeStateVector(doc);
+  doc.getMap(root).set('legion/state/world.json', new Y.Text('{"nodes":[3]}'));
+  doc.getMap(root).set('legion/state/index.json', new Y.Text('{"forged":"index"}'));
+  await agent.proposeCode(Y.encodeStateAsUpdateV2(doc, before));
+  doc.destroy();
+  await agent.finalizeDraft();
+  const edits = (await workspace.getChatHistory(chat)).messages.filter(message => message.type === 'changes');
+  await workspace.mergeChanges(chat, edits.at(-1).sequence);
+  const merged = await composition.readComposition();
+  assert.equal(merged.slots.find(slot => slot.id === 'world').bytes, '{"nodes":[3]}');
+  const accepted = await agent.observe();
+  const index = JSON.parse(fileText(accepted.update, root, 'legion/state/index.json'));
+  assert.equal(index.forged, undefined);
+  assert.equal(index.slots.find(slot => slot.id === 'world').token.digest, digest('{"nodes":[3]}'));
+  assert.equal((await composition.applyCompositionChanges({protocol: 2, operationId: crypto.randomUUID(), changes: [change(beforeInvalid, 'world', '{}')]})).state, 'rejected');
+
+  const failingChat = await workspace.newChat('Reject invalid managed proposal atomically', null);
+  const failingAgent = retain(await workspace.createContribution(failingChat, author));
+  const provisional = await failingAgent.createGadget('Must stay provisional', 'PROVISIONAL');
+  const invalidObserved = await failingAgent.observe();
+  await failingAgent.proposeCode(addFile(invalidObserved.update, root, 'legion/state/world.json', '{'));
+  await failingAgent.finalizeDraft();
+  const invalidEdits = (await workspace.getChatHistory(failingChat)).messages.filter(message => message.type === 'changes');
+  const beforeFailedAcceptance = await composition.readComposition();
+  await assert.rejects(Promise.resolve(workspace.mergeChanges(failingChat, invalidEdits.at(-1).sequence)), /Managed composition JSON/);
+  const afterFailure = await failingAgent.observe();
+  assert.equal(afterFailure.workpieces.find(item => item.id === provisional.id).chatId, failingChat, 'Failed acceptance cannot promote a gadget');
+  assert.equal((await workspace.getChatHistory(failingChat)).messages.some(message => message.type === 'merge'), false);
+  assert.deepEqual(await composition.readComposition(), beforeFailedAcceptance, 'Failed proposal preserves accepted source and guards');
+
+  const currentBundle = await gadget.getUiBundle();
+  assert.deepEqual(currentBundle.identity, originalBundle.identity, 'State saves/proposals preserve both native generations');
+  assert.equal(await originalFacet.read(), originalFacetId, 'Real workerd facet survived all state saves and proposal acceptance');
+  const connectedAgain = retain(await gadget.connectToGadget(undefined, currentBundle.identity));
+  assert.equal(await connectedAgain.read(), originalFacetId);
+
+  const executable = new Y.Doc(); Y.applyUpdateV2(executable, accepted.update);
+  const beforeExecutable = Y.encodeStateVector(executable);
+  executable.getMap(root).set('server.js', new Y.Text(`import {DurableObject} from 'cloudflare:workers';
+    export class Gadget extends DurableObject { identity = crypto.randomUUID(); read() {return this.identity + '-new';} }`));
+  await workspace.updateCode(Y.encodeStateAsUpdateV2(executable, beforeExecutable));
+  executable.destroy();
+  const changedBundle = await gadget.getUiBundle();
+  assert.ok(changedBundle.identity.executionGeneration > currentBundle.identity.executionGeneration);
+  assert.equal(changedBundle.identity.uiGeneration, currentBundle.identity.uiGeneration);
+  await assert.rejects(Promise.resolve(gadget.connectToGadget(undefined, currentBundle.identity)), /EXECUTION_REFRESH_REQUIRED/);
+  const newFacet = retain(await gadget.connectToGadget(undefined, changedBundle.identity));
+  assert.notEqual(await newFacet.read(), originalFacetId);
+  assert.match(await newFacet.read(), /-new$/);
+  const reopened = retain(await workspace.getComposition(gadgetId));
+  assert.deepEqual((await reopened.readComposition()).slots, merged.slots);
+  await workspace.setCompositionWritesEnabled(gadgetId, protocol, false);
+  await assert.rejects(Promise.resolve(reopened.applyCompositionChanges({protocol: 2, operationId: crypto.randomUUID(), changes: [change(merged, 'world', '{}')]})), /disabled/);
+  assert.deepEqual(await reopened.readCompositionOperation(request.operationId), committed, 'Disabled writes still permit resolution of earlier effects');
+  workspace[Symbol.dispose]();
+  await eventuallyRejected(() => reopened.readComposition(), /access ended/);
 });

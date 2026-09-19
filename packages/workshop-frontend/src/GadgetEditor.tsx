@@ -581,7 +581,6 @@ export default function GadgetEditor() {
   }, [isGadgetFullscreen, exitGadgetFullscreen])
 
   // ── code / chat state ────────────────────────────────────────────────────────
-  const [uiReloadTrigger, setUiReloadTrigger] = useState(0)
   const [autoApproveReloadTrigger, setAutoApproveReloadTrigger] = useState(0)
   const [proposedChanges, setProposedChanges] = useState<Uint8Array | undefined>(undefined)
   const [draftProposedChanges, setDraftProposedChanges] = useState<StreamingProposedChanges | undefined>(undefined)
@@ -1185,7 +1184,7 @@ export default function GadgetEditor() {
   }, [overseer])
 
   // ── reload UI when preview branch/code changes ────────────────────────────────
-  useEffect(() => { setUiReloadTrigger(t => t + 1) }, [previewChatId, proposedChanges])
+  // Native GadgetUI observes committed execution identity for its selected branch.
 
   // ── user info ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1640,7 +1639,6 @@ export default function GadgetEditor() {
                   key={selectedGadgetId}
                   gadget={selectedGadgetStub}
                   height={isGadgetFullscreen ? '100%' : RIGHT_CONTENT_H}
-                  reloadTrigger={uiReloadTrigger}
                   isVisible={activeTab === 'app' && !previewMode}
                   chatId={previewChatId}
                   onConsoleLog={handleClientConsoleLog}
@@ -1668,7 +1666,6 @@ export default function GadgetEditor() {
                   overseer={overseer.stub}
                   filesRoot={selectedFilesRoot}
                   height={RIGHT_CONTENT_H}
-                  onCodeChange={() => setUiReloadTrigger(t => t + 1)}
                   selectedChatId={effectiveSelectedChatId}
                   proposedChanges={proposedChanges}
                   draftProposedChanges={draftProposedChanges}
@@ -1691,7 +1688,6 @@ export default function GadgetEditor() {
                   gadget={selectedGadgetStub}
                   chatId={effectiveSelectedChatId ?? undefined}
                   authenticatedApi={authenticatedApi}
-                  onConnectionsChange={() => setUiReloadTrigger(t => t + 1)}
                   isVisible={activeTab === 'connections'}
                   onHasGatekeepersChange={setHasBindings}
                 />
@@ -1729,7 +1725,6 @@ export default function GadgetEditor() {
               key={selectedGadgetId}
               gadget={selectedGadgetStub}
               height="100%"
-              reloadTrigger={uiReloadTrigger}
               isVisible={true}
               chatId={previewChatId}
               onConsoleLog={handleClientConsoleLog}

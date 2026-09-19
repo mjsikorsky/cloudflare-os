@@ -109,7 +109,70 @@ export interface Singleton<T> {
 
 export interface TypedStorage {
   transaction<T>(callback: () => T): T;
+  /** Commit synchronous writes while retaining external notifications for delivery
+   * after the caller's durability barrier. Index maintenance remains synchronous. */
+  collectTransaction<T>(callback: () => T, beforeCommit?: (changes: readonly StorageChange[]) => void): CollectedTransaction<T>;
 };
+
+/** A committed transaction's external observer delivery, callable once. */
+export interface CollectedTransaction<T> {
+  /** Result of the synchronous transaction callback. */
+  value: T;
+  /** Collection/key references suitable for an owner's durable outbox. */
+  changes: readonly StorageChange[];
+  /** Deliver retained live observers after durability. A restart uses the owner's outbox. */
+  deliver(): void;
+}
+
+/** A native storage location changed within a collected transaction. */
+export type StorageChange = {
+  /** Collection name, or singleton name when kind is singleton. */
+  name: string;
+  /** Collection primary key; omitted for a singleton. */
+  key?: string | number;
+  /** Native mutation kind. */
+  kind: 'add' | 'update' | 'remove' | 'singleton';
+};
+
+class NotificationCollector {
+  frames: Array<{changes: StorageChange[]; callbacks: Array<() => void>}> = [];
+  notify(change: StorageChange, callback: () => void) {
+    const frame = this.frames.at(-1);
+    if (frame) { frame.changes.push(change); frame.callbacks.push(callback); }
+    else callback();
+  }
+  collect<T>(storage: DurableObjectStorage, callback: () => T, beforeCommit?: (changes: readonly StorageChange[]) => void): CollectedTransaction<T> {
+    const frame = {changes: [] as StorageChange[], callbacks: [] as Array<() => void>};
+    this.frames.push(frame);
+    let value: T;
+    try {
+      value = storage.transactionSync(() => {
+        const result = callback();
+        if (result && typeof (result as any).then === 'function') {
+          throw new TypeError('A typed-storage transaction must be synchronous.');
+        }
+        beforeCommit?.([...frame.changes]);
+        return result;
+      });
+    } catch (error) { this.frames.pop(); throw error; }
+    this.frames.pop();
+    const parent = this.frames.at(-1);
+    if (parent) {
+      parent.changes.push(...frame.changes);
+      parent.callbacks.push(...frame.callbacks);
+    }
+    let delivered = Boolean(parent);
+    return { value, changes: frame.changes, deliver() {
+      if (delivered) return;
+      delivered = true;
+      let failure: unknown;
+      for (const notify of frame.callbacks) {
+        try { notify(); } catch (error) { failure ??= error; }
+      }
+      if (failure !== undefined) throw failure;
+    }};
+  }
+}
 
 type ValidPrimaryKeys<T> = {
   [K in keyof T]: T[K] extends Key ? K : never;
@@ -122,12 +185,12 @@ type PrimaryKeyType<T, K extends PrimaryKeySpec<T>> =
   : K extends ((record: T) => Key) ? ReturnType<K>
   : never;
 
-interface CollectionSchemaBrand {
+export interface CollectionSchemaBrand {
   "__COLLECTION_SCHEMA_BRAND": never;
 }
 
 // TODO: Add singleton values.
-interface CollectionSchema<
+export interface CollectionSchema<
       T extends object,
       PrimaryKey extends PrimaryKeySpec<T>,
       UniqueIndexes,
@@ -290,8 +353,10 @@ function createCollection<
       storage: DurableObjectStorage,
       name: string,
       schema: CollectionSchema<T, PrimaryKey, UniqueIndexes, NonUniqueIndexes>,
+      notifications: NotificationCollector,
     ): CollectionImpl<T, PrimaryKey, UniqueIndexes, NonUniqueIndexes> {
   let subscribers: Set<Subscriber<T>> = new Set();
+  let indexSubscribers: Set<Subscriber<T>> = new Set();
 
   let mainKv: KvPrefixedView<T>;
   let pkForT: (record: T) => Key;
@@ -313,21 +378,31 @@ function createCollection<
     },
     put(record: T): void {
       let key = pkForT(record);
-      if (subscribers.size == 0) {
+      if (subscribers.size == 0 && indexSubscribers.size == 0 && notifications.frames.length == 0) {
         mainKv.put(key, record);
       } else {
         storage.transactionSync(() => {
           let oldRecord = mainKv.get(key);
           if (oldRecord === undefined) {
-            for (let subscriber of subscribers) {
+            for (let subscriber of indexSubscribers) {
               subscriber.add(record);
             }
           } else {
-            for (let subscriber of subscribers) {
+            for (let subscriber of indexSubscribers) {
               subscriber.update(oldRecord, record);
             }
           }
           mainKv.put(key, record);
+          // Read back the stored value so later caller mutation cannot alter a
+          // buffered notification. Native KV retains the serialization semantics.
+          const committed = mainKv.get(key)!;
+          const observers = [...subscribers];
+          notifications.notify({name, key, kind: oldRecord === undefined ? 'add' : 'update'}, () => {
+            for (const observer of observers) if (subscribers.has(observer)) {
+              if (oldRecord === undefined) observer.add(committed);
+              else observer.update(oldRecord, committed);
+            }
+          });
         });
       }
     },
@@ -335,7 +410,7 @@ function createCollection<
       return mainKv.list(options);
     },
     delete(key: Key): boolean {
-      if (subscribers.size == 0) {
+      if (subscribers.size == 0 && indexSubscribers.size == 0 && notifications.frames.length == 0) {
         return mainKv.delete(key);
       } else {
         return storage.transactionSync(() => {
@@ -344,10 +419,15 @@ function createCollection<
             return false;
           }
 
-          for (let subscriber of subscribers) {
+          for (let subscriber of indexSubscribers) {
             subscriber.remove(oldRecord);
           }
-          return mainKv.delete(key);
+          const removed = mainKv.delete(key);
+          const observers = [...subscribers];
+          notifications.notify({name, key, kind: 'remove'}, () => {
+            for (const observer of observers) if (subscribers.has(observer)) observer.remove(oldRecord);
+          });
+          return removed;
         });
       }
     },
@@ -374,7 +454,7 @@ function createCollection<
         add(idxKey: Key, pk: Key, type: "Insertion" | "Update"): void;
         remove(idxKey: Key, pk: Key): void;
       }) {
-    subscribers.add({
+    indexSubscribers.add({
       add(record: T) {
         let pk = pkForT(record);
         let idxKeys = idx(record);
@@ -599,13 +679,19 @@ export function createTypedStorage<Collections extends Record<string, Collection
     : TypedStorageImpl<Collections, Singletons> {
   let typedStorage: TypedStorage = {
     transaction<T>(callback: () => T): T {
-      return storage.transactionSync(callback);
-    }
+      const committed = notifications.collect(storage, callback);
+      committed.deliver();
+      return committed.value;
+    },
+    collectTransaction<T>(callback: () => T, beforeCommit?: (changes: readonly StorageChange[]) => void): CollectedTransaction<T> {
+      return notifications.collect(storage, callback, beforeCommit);
+    },
   };
+  const notifications = new NotificationCollector();
   let result: any = typedStorage;
 
   for (let [colName, colSchema] of Object.entries(schema.collections || {})) {
-    result[colName] = createCollection(storage, colName, <any>colSchema);
+    result[colName] = createCollection(storage, colName, <any>colSchema, notifications);
   }
 
   for (let [key, defaultValue] of Object.entries(schema.singletons || {})) {
@@ -621,14 +707,16 @@ export function createTypedStorage<Collections extends Record<string, Collection
       },
 
       put(value: any): void {
-        if (subscribers.size === 0) {
+        if (subscribers.size === 0 && notifications.frames.length === 0) {
           storage.kv.put(key, value);
         } else {
           storage.transactionSync(() => {
-            for (let subscriber of subscribers) {
-              subscriber.update(value);
-            }
             storage.kv.put(key, value);
+            const committed = storage.kv.get(key);
+            const observers = [...subscribers];
+            notifications.notify({name: key, kind: 'singleton'}, () => {
+              for (const subscriber of observers) if (subscribers.has(subscriber)) subscriber.update(committed);
+            });
           });
         }
       },

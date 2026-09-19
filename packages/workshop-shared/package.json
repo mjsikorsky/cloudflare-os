@@ -32,6 +32,10 @@
     "./workspace-code": {
       "types": "./src/workspace-code.ts",
       "import": "./src/workspace-code.ts"
+    },
+    "./composition": {
+      "types": "./src/composition.ts",
+      "import": "./src/composition.ts"
     }
   },
   "scripts": {

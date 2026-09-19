@@ -5,7 +5,7 @@ import { act, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { newMessagePortRpcSession, RpcStub, RpcTarget } from 'capnweb'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { GadgetClient, UiBundle } from '@gadgets/workshop-shared/api'
+import type { GadgetClient, UiBundle, GadgetExecutionIdentity } from '@gadgets/workshop-shared/api'
 
 const testGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
 const previousActEnvironment = testGlobal.IS_REACT_ACT_ENVIRONMENT
@@ -116,6 +116,8 @@ class TestCallbacks extends RpcTarget implements TestSubscriber {
   }
 }
 
+const initialIdentity: GadgetExecutionIdentity = {gadgetId: 1, chatId: null, executionGeneration: 1, uiGeneration: 1}
+
 function fakeGadget(
   value: string,
   bundleCode: string,
@@ -123,11 +125,19 @@ function fakeGadget(
     async () => new RpcStub(new TestGadgetTarget(value)) as unknown as RpcStub<TestGadget>,
   ),
 ) {
-  const getUiBundle = vi.fn<() => Promise<UiBundle>>(async () => ({ jsCode: bundleCode }))
+  let identity = {...initialIdentity}
+  let observer: ((identity: GadgetExecutionIdentity) => void) | undefined
+  const subscribeToExecutionIdentity = vi.fn(async (_chatId: number | null, callback: (identity: GadgetExecutionIdentity) => void) => {
+    observer = callback
+    callback(identity)
+    return {[Symbol.dispose]() { if (observer === callback) observer = undefined }}
+  })
+  const getUiBundle = vi.fn<() => Promise<UiBundle>>(async () => ({ jsCode: bundleCode, identity }))
   return {
     connectToGadget,
     getUiBundle,
-    stub: { connectToGadget, getUiBundle } as unknown as RpcStub<GadgetClient>,
+    updateIdentity(next: GadgetExecutionIdentity) { identity = next; observer?.(next) },
+    stub: { connectToGadget, getUiBundle, subscribeToExecutionIdentity } as unknown as RpcStub<GadgetClient>,
   }
 }
 
@@ -358,6 +368,27 @@ describe('GadgetUI RPC recovery', () => {
     await expect(child.read()).resolves.toBe('current')
   })
 
+  it('preserves the live iframe for state notices and reconnects only for a backend generation change', async () => {
+    const gadget = fakeGadget('native', 'document.body.textContent = "original"')
+    await act(async () => root.render(<GadgetUI gadget={gadget.stub} height="100px" />))
+    const iframe = container.querySelector('iframe')!
+    const channel = new MessageChannel()
+    const client = newMessagePortRpcSession<TestGadget>(channel.port2)
+    childSessions.push(client)
+    await act(async () => dispatchIframeHandshake(iframe, channel.port1))
+    expect(await client.read()).toBe('native')
+    const connections = gadget.connectToGadget.mock.calls.length
+    await act(async () => gadget.updateIdentity({...initialIdentity}))
+    expect(container.querySelector('iframe')).toBe(iframe)
+    expect(gadget.connectToGadget.mock.calls.length).toBe(connections)
+    await act(async () => gadget.updateIdentity({...initialIdentity, executionGeneration: 2}))
+    expect(container.querySelector('iframe')).toBe(iframe)
+    expect(gadget.connectToGadget.mock.calls.length).toBe(connections + 1)
+    expect(await client.read()).toBe('native')
+    await act(async () => gadget.updateIdentity({...initialIdentity, executionGeneration: 3, uiGeneration: 2}))
+    expect(container.querySelector('iframe')).not.toBe(iframe)
+  })
+
   it('ignores an old bundle that resolves after the gadget client is replaced', async () => {
     const oldBundle = deferred<UiBundle>()
     const first = fakeGadget('first', 'unused')
@@ -378,7 +409,7 @@ describe('GadgetUI RPC recovery', () => {
     })
 
     await act(async () => {
-      oldBundle.resolve({ jsCode: 'document.body.textContent = "stale"' })
+      oldBundle.resolve({ jsCode: 'document.body.textContent = "stale"', identity: initialIdentity })
       await oldBundle.promise
     })
 
@@ -404,7 +435,7 @@ describe('GadgetUI RPC recovery', () => {
     expect(replacement.getUiBundle).not.toHaveBeenCalled()
 
     await act(async () => {
-      oldBundle.resolve({ jsCode: 'document.body.textContent = "stale"' })
+      oldBundle.resolve({ jsCode: 'document.body.textContent = "stale"', identity: initialIdentity })
       await oldBundle.promise
     })
 

@@ -1173,7 +1173,21 @@ export type OutputSummary = {
 // Describes the client-side UI code for a Gadget. Such code is intended to run inside an iframe
 // sandbox with no access to the outside world except through an RPC interface to the Workshop
 // and to the Gadget's server.
+/** Native identity of a gadget's executable branch and visible UI. */
+export type GadgetExecutionIdentity = {
+  /** Native workpiece ID. */
+  gadgetId: WorkpieceId;
+  /** Null is mainline; each materialized chat preview remains distinct. */
+  chatId: number | null;
+  /** Monotone native executable generation. */
+  executionGeneration: number;
+  /** Monotone generation of the actual native UI bundle. */
+  uiGeneration: number;
+};
+
 export type UiBundle = {
+  /** Identity captured with these exact UI bytes. */
+  identity: GadgetExecutionIdentity;
   // URL from which the main bundle of UI code can be downloaded. This download contains all the
   // Gadget's client-side assets. The URL is content-addressed to make it highly cacheable, even
   // across multiple Gadgets sharing the same implementation (blueprint).
@@ -1368,7 +1382,18 @@ export interface WorkspaceContribution extends RpcTarget {
   finalizeDraft(): Promise<void>;
 }
 
+import type {CompositionClient, CompositionInitialSlot} from './composition';
+export type {CompositionClient, CompositionInitialSlot, CompositionToken, CompositionSlot, CompositionWrite, CompositionReceipt} from './composition';
+
 export interface Overseer extends RpcTarget {
+  /** Explicit owner creation of a managed composition on an existing native gadget.
+   * Repeating the identical template returns the same instance without overwriting edits. */
+  initializeComposition(gadgetId: WorkpieceId, slots: readonly CompositionInitialSlot[]): Promise<RpcStub<CompositionClient>>;
+  /** Open registered authored state under this workspace session's native authority. */
+  getComposition(gadgetId: WorkpieceId): Promise<RpcStub<CompositionClient>>;
+  /** Explicit owner activation after deployment compatibility and adapter qualification.
+   * Checks native readiness; registration alone never enables managed writes. */
+  setCompositionWritesEnabled(gadgetId: WorkpieceId, expected: {instanceEpoch: string; registrationRevision: number; protocol: 2}, enabled: boolean): Promise<void>;
   /** Delegate observation and proposals for an existing chat to an external agent.
    * Requires an already-open build-capable workspace, including its observer verification.
    * The returned capability retains this session's lifetime and cannot widen its authority.
@@ -2819,7 +2844,10 @@ export interface GadgetClient extends WorkpieceClient {
   // chat.
   //
   // @ts-ignore - TODO: Fix type instantiation issue
-  connectToGadget(chatId?: number): Promise<RpcStub<any>>;
+  connectToGadget(chatId?: number, expectedIdentity?: GadgetExecutionIdentity): Promise<RpcStub<any>>;
+
+  /** Observe committed executable/UI identity without subscribing to editable source. */
+  subscribeToExecutionIdentity(chatId: number | null, subscriber: RpcStub<(identity: GadgetExecutionIdentity) => void>): Promise<RpcStub<{}>>;
 
   /**
    * Renders the Gadget's UI as a PDF. If `chatId` is specified, the PDF includes changes currently

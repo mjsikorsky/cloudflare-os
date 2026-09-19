@@ -1,3 +1,4 @@
+import type {GadgetExecutionIdentity} from '@gadgets/workshop-shared/api';
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
@@ -9,6 +10,11 @@ import {
 } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import * as Y from "yjs";
+import {createHash} from 'node:crypto';
+import {compositionCollections, prepareCompositionGuards, applyCompositionToCandidate,
+  canonicalComposition, readCompositionState, validateCompositionRegistration} from './composition-state';
+import type {CompositionClient, CompositionInitialSlot, CompositionWrite, CompositionReceipt} from '@gadgets/workshop-shared/composition';
+import type {StorageChange} from '@gadgets/typed-storage';
 import {
   LanguageModelGatekeeperProps,
   getModel,
@@ -713,6 +719,7 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       ownerRegistrationPending: false,
 
       codeVersion: 0,
+      acceptedMutationEpoch: 0,
       totalCost: 0,
 
       // Next workpiece ID. This is called `nextGatekeeperId` for historical reasons (it predates
@@ -730,6 +737,16 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
     },
 
     collections: {
+      ...compositionCollections,
+      gadgetExecutions: collection<{
+        key: string; gadgetId: number; chatId: number | null; generation: number; uiGeneration: number;
+        inputDigest?: string; uiDigest?: string; checkedCodeBaseVersion: number;
+        checkedBranchSequence: number; checkedMutationEpoch: number; formatVersion: 2;
+      }>()({primaryKey: 'key'}),
+      acceptedMutationOutbox: collection<{
+        id: number; sourceVersion: number; mutationEpoch: number;
+        changes: readonly StorageChange[]; affectedGadgets: number[];
+      }>()({primaryKey: 'id'}),
       // All incremental code changes from the beginning of time. This table is tightly-packed,
       // starting from 1. (There's no entry for version 0 since it represents the starting empty
       // state.)
@@ -1021,6 +1038,72 @@ class OverseerImpl implements AgentHooks {
   // Tracks the size of the most-recent snapshot, and the size of all incremental updates since,
   // in order to help decide when to make a new snapshot.
   #snapshotMetrics?: {snapshotSize: number, logSize: number};
+  #acceptedSourceCache?: {version: number; update: Uint8Array};
+  #acceptedMutation?: {affectedGadgets: Set<number>};
+  #acceptedNotifications = new Map<number, () => void>();
+  #acceptedDelivery?: Promise<void>;
+
+  /** One native transaction for source/guards and any surrounding acceptance records. */
+  mutateAccepted<T>(operation: () => T): T {
+    if (this.#acceptedMutation) return operation();
+    const effects = {affectedGadgets: new Set<number>()};
+    this.#acceptedMutation = effects;
+    let noticeId = 0;
+    try {
+      const committed = this.storage.collectTransaction(operation, changes => {
+        this.refreshExecutionIdentities();
+        noticeId = this.storage.acceptedMutationEpoch.get() + 1;
+        this.storage.acceptedMutationEpoch.put(noticeId);
+        this.storage.acceptedMutationOutbox.put({id: noticeId,
+          sourceVersion: this.currentCodeBaseVersion(), mutationEpoch: noticeId,
+          changes, affectedGadgets: [...effects.affectedGadgets]});
+      });
+      this.#acceptedNotifications.set(noticeId, () => committed.deliver());
+      this.drainAcceptedMutations();
+      return committed.value;
+    } catch (error) {
+      this.#snapshotMetrics = undefined;
+      this.#acceptedSourceCache = undefined;
+      throw error;
+    } finally { this.#acceptedMutation = undefined; }
+  }
+
+  /** Native source history is the replay source after a restart. No RPC closures
+   * or authored bytes are persisted in the notification outbox. */
+  drainAcceptedMutations(): void {
+    if (this.#acceptedDelivery) return;
+    let failed = false;
+    this.#acceptedDelivery = (async () => {
+      for (;;) {
+        const notice = [...this.storage.acceptedMutationOutbox.list({limit: 1})][0];
+        if (!notice) break;
+        await this.ctx.storage.sync();
+        this.#acceptedNotifications.get(notice.id)?.();
+        this.#acceptedNotifications.delete(notice.id);
+        for (const [id, running] of this.#runningExecutions) {
+          if (!this.storage.gadgets.get(id)) continue;
+          const desired = this.executionSnapshot(id, this.executionChat(id, running.chatId ?? undefined)).identity;
+          if (!this.sameExecution(running, desired)) {
+            this.ctx.facets.abort(this.gadgetFacetName(id), new Error('Gadget restarted due to executable change.'));
+            this.#runningExecutions.delete(id);
+          }
+        }
+        this.notifyExecutionIdentities();
+        this.bumpLastActive();
+        this.markOutputsDirty();
+        this.storage.acceptedMutationOutbox.delete(notice.id);
+      }
+    })().catch(error => {
+      failed = true;
+      this.logger.warn('accepted source notification delivery failed', {
+        event: 'workspace.accepted.delivery.failed', error,
+      });
+    }).finally(() => {
+      this.#acceptedDelivery = undefined;
+      if (!failed && [...this.storage.acceptedMutationOutbox.list({limit: 1})].length) this.drainAcceptedMutations();
+    });
+    this.ctx.waitUntil(this.#acceptedDelivery);
+  }
 
   // Per-chat in-memory state for running agents and pending agent callbacks.
   #liveChats = new Map<number, LiveChatContext>();
@@ -1311,6 +1394,7 @@ class OverseerImpl implements AgentHooks {
     // The migration is fully synchronous, so nothing can observe pre-migration state.
     this.#migrateStorage();
     this.defaultGadgetId = this.storage.defaultGadgetId.get();
+    this.drainAcceptedMutations();
 
     this.#autoApprovalDrainer = new AutoApprovalDrainer(
         this.storage,
@@ -1366,7 +1450,10 @@ class OverseerImpl implements AgentHooks {
 
   // Migrate storage to the current schema version. Runs synchronously in the constructor.
   #migrateStorage(): void {
-    if (this.storage.version.get() !== 0) return;
+    const version = this.storage.version.get();
+    if (version > 2) throw new Error('Workspace storage requires a newer native reader.');
+    if (version === 2) return;
+    if (version === 1) { this.migrateCompositionStorage(); return; }
     if (this.ownerId === undefined) {
       // Brand-new (or never-initialized) DO: there is nothing to migrate. We deliberately avoid
       // writing anything here, so that probing a nonexistent DO leaves no storage behind; the
@@ -1455,6 +1542,23 @@ class OverseerImpl implements AgentHooks {
       }
 
       this.storage.version.put(1);
+    });
+    this.migrateCompositionStorage();
+  }
+
+  private migrateCompositionStorage(): void {
+    if (this.ownerId === undefined) return;
+    this.ctx.storage.transactionSync(() => {
+      for (const gadget of this.storage.gadgets.list()) {
+        if (gadget.pending) continue;
+        const key = JSON.stringify([gadget.id, null]);
+        if (!this.storage.gadgetExecutions.get(key)) this.storage.gadgetExecutions.put({key,
+          gadgetId: gadget.id, chatId: null, generation: Math.max(1, this.storage.codeVersion.get()),
+          uiGeneration: Math.max(1, this.storage.codeVersion.get()), checkedCodeBaseVersion: -1,
+          checkedBranchSequence: 0, checkedMutationEpoch: -1, formatVersion: 2});
+      }
+      this.storage.acceptedMutationEpoch.put(0);
+      this.storage.version.put(2);
     });
   }
 
@@ -1986,19 +2090,46 @@ class OverseerImpl implements AgentHooks {
 
   // Construct a `Y.Doc` for the current code version.
   buildYDoc(version: number | "current"): {ydoc: Y.Doc, version: number} {
-    // TODO: Use snapshots.
+    const requested = version === 'current' ? this.currentCodeBaseVersion() : version;
     let ydoc = new Y.Doc();
+    if (this.#acceptedSourceCache?.version === requested) {
+      Y.applyUpdateV2(ydoc, this.#acceptedSourceCache.update);
+      return {ydoc, version: requested};
+    }
     version = this.replayUpdates(0, version, (version: CodeUpdate) => {
       Y.applyUpdateV2(ydoc, version.update);
     });
+    if (version === this.currentCodeBaseVersion()) this.#acceptedSourceCache = {version, update: Y.encodeStateAsUpdateV2(ydoc)};
     return {ydoc, version};
   }
 
   // Apply a Yjs-encoded (V2) update to the code, incrementing the code version.
   updateCode(update: Uint8Array): number {
-    let version = this.bumpVersion();
+    return this.mutateAccepted(() => this.commitAcceptedCode(update));
+  }
+
+  private commitAcceptedCode(update: Uint8Array): number {
+    this.refreshExecutionIdentities();
+    const {ydoc: candidate} = this.buildYDoc('current');
+    const before = Y.encodeStateVector(candidate);
+    const gadgets = [...this.storage.gadgets.list()];
+    const previousExecutables = new Map(gadgets.map(gadget => [gadget.id, this.executableFiles(candidate, gadget.id)]));
+    let affectedGadgets: number[];
+    let prepared: ReturnType<typeof prepareCompositionGuards>;
+    try {
+      Y.applyUpdateV2(candidate, update);
+      prepared = prepareCompositionGuards({storage: this.storage, candidate,
+        sourceVersion: this.storage.codeVersion.get() + 1,
+        gadgets: new Map([...this.storage.gadgets.list()].map(gadget => [gadget.id,
+          {root: this.gadgetRootName(gadget.id), pending: gadget.pending}]))});
+      // Include pending foreign structs as well as the owner's index repair.
+      update = Y.mergeUpdatesV2([update, Y.encodeStateAsUpdateV2(candidate, before)]);
+      affectedGadgets = gadgets.filter(gadget => previousExecutables.get(gadget.id) !== this.executableFiles(candidate, gadget.id)).map(gadget => gadget.id);
+    } finally { candidate.destroy(); }
+    let version = this.bumpVersion(affectedGadgets);
     let timestamp = new Date();
     this.storage.code.put({version, timestamp, update});
+    for (const guard of prepared.guards) this.storage.compositionSlotGuards.put(guard);
 
     if (this.#snapshotMetrics) {
       this.#snapshotMetrics.logSize += update.length;
@@ -2100,14 +2231,102 @@ class OverseerImpl implements AgentHooks {
   // Which chat ID is each gadget's facet currently running from? Keyed by gadget ID; a gadget
   // with no entry has never had its facet loaded this session.
   #runningChatIds = new Map<WorkpieceId, number | null>();
+  #runningExecutions = new Map<WorkpieceId, GadgetExecutionIdentity>();
+  #executionSubscribers = new Set<{gadgetId: number; chatId: number | null;
+    subscriber: RpcStub<(identity: GadgetExecutionIdentity) => void>; last: string; initializing: boolean}>();
 
-  proposedChangesChanged(chatId: number) {
-    for (let [gadgetId, runningChatId] of this.#runningChatIds) {
-      if (runningChatId === chatId) {
-        this.ctx.facets.abort(this.gadgetFacetName(gadgetId), new Error(
-            "Gadget restarted because the proposed changes changed."));
+  private executableFiles(doc: Y.Doc, gadgetId: WorkpieceId): string {
+    return JSON.stringify([...doc.getMap<Y.Text>(this.gadgetRootName(gadgetId))]
+      .filter(([file]) => file.endsWith('.js'))
+      .map(([file, content]) => [file, content.toString()]).sort(([a], [b]) => a.localeCompare(b)));
+  }
+
+  executionChat(_gadgetId: WorkpieceId, chatId?: number): number | undefined {
+    if (chatId !== undefined && this.storage.chatMeta.get(chatId)?.hasProposedChanges) return chatId;
+    return undefined;
+  }
+
+  sameExecution(a: GadgetExecutionIdentity, b: GadgetExecutionIdentity): boolean {
+    return a.gadgetId === b.gadgetId && a.chatId === b.chatId && a.executionGeneration === b.executionGeneration;
+  }
+
+  /** One captured source/binding view feeds classification and the lazy native loader. */
+  executionSnapshot(gadgetId: WorkpieceId, chatId?: number, sequence?: number) {
+    const {ydoc, version} = this.buildYDoc('current');
+    try {
+      if (chatId !== undefined) this.getProposedChanges(chatId, sequence).forEach(({update}) => {
+        if (update !== undefined) Y.applyUpdateV2(ydoc, update);
+      });
+      const gadget = this.getGadgetRecord(gadgetId);
+      const modules = Object.fromEntries(JSON.parse(this.executableFiles(ydoc, gadgetId))) as Record<string, string>;
+      const bindings = [...this.visibleBindings(gadget, chatId)].map(([name, binding]) => [name, binding.target]).sort(([a], [b]) => String(a).localeCompare(String(b)));
+      const branch = chatId ?? null;
+      const key = JSON.stringify([gadgetId, branch]);
+      const compatibilityDate = '2026-02-01';
+      const compatibilityFlags = ['allow_irrevocable_stub_storage'];
+      const mainModule = 'server.js';
+      const inputDigest = createHash('sha256').update(canonicalComposition({modules, bindings,
+        workspaceId: this.ctx.id.toString(), gadgetId, chatId: branch, mainModule, compatibilityDate, compatibilityFlags})).digest('hex');
+      const uiCode = ydoc.getMap<Y.Text>(this.gadgetRootName(gadgetId)).get('client.js')?.toString() ?? null;
+      const uiDigest = createHash('sha256').update(canonicalComposition([branch, uiCode])).digest('hex');
+      const old = this.storage.gadgetExecutions.get(key);
+      const record = {key, gadgetId, chatId: branch, formatVersion: 2 as const,
+        generation: old ? old.generation + Number(old.inputDigest !== undefined && old.inputDigest !== inputDigest) : 1,
+        uiGeneration: old ? old.uiGeneration + Number(old.uiDigest !== undefined && old.uiDigest !== uiDigest) : 1,
+        inputDigest, uiDigest, checkedCodeBaseVersion: version,
+        checkedBranchSequence: chatId === undefined ? 0 : sequence ?? this.storage.nextChatSequences.get(chatId)?.nextSequence ?? 0,
+        checkedMutationEpoch: this.storage.acceptedMutationEpoch.get()};
+      if (canonicalComposition(old ?? null) !== canonicalComposition(record)) this.storage.gadgetExecutions.put(record);
+      const identity: GadgetExecutionIdentity = {gadgetId, chatId: branch,
+        executionGeneration: record.generation, uiGeneration: record.uiGeneration};
+      return {modules, identity, uiCode, mainModule, compatibilityDate, compatibilityFlags,
+        env: this.getEnvForLoader(gadgetId, {from: 'gadget', chatId, gadgetId}, chatId)};
+    } finally { ydoc.destroy(); }
+  }
+
+  private refreshExecutionIdentities() {
+    for (const gadget of [...this.storage.gadgets.list()]) {
+      if (!gadget.pending) this.executionSnapshot(gadget.id);
+    }
+    for (const record of [...this.storage.gadgetExecutions.list()]) {
+      if (record.chatId !== null && this.storage.gadgets.get(record.gadgetId) && this.storage.chatMeta.get(record.chatId)) {
+        this.executionSnapshot(record.gadgetId, record.chatId);
       }
     }
+  }
+
+  private notifyExecutionIdentities() {
+    for (const item of this.#executionSubscribers) {
+      if (item.initializing) continue;
+      try {
+        const identity = this.executionSnapshot(item.gadgetId, this.executionChat(item.gadgetId, item.chatId ?? undefined)).identity;
+        const encoded = JSON.stringify(identity);
+        if (encoded === item.last) continue;
+        item.last = encoded;
+        item.subscriber(identity).catch(() => { this.#executionSubscribers.delete(item); item.subscriber[Symbol.dispose](); });
+      } catch { this.#executionSubscribers.delete(item); item.subscriber[Symbol.dispose](); }
+    }
+  }
+
+  async subscribeExecution(gadgetId: number, chatId: number | null, subscriber: RpcStub<(identity: GadgetExecutionIdentity) => void>): Promise<RpcStub<{}>> {
+    if (chatId !== null) this.getChatMetaOrThrow(chatId);
+    const identity = this.executionSnapshot(gadgetId, this.executionChat(gadgetId, chatId ?? undefined)).identity;
+    const item = {gadgetId, chatId, subscriber: subscriber.dup(), last: JSON.stringify(identity), initializing: true};
+    this.#executionSubscribers.add(item);
+    try {
+      await this.ctx.storage.sync();
+      const current = this.executionSnapshot(gadgetId, this.executionChat(gadgetId, chatId ?? undefined)).identity;
+      item.last = JSON.stringify(current); item.initializing = false;
+      await item.subscriber(current);
+    }
+    catch (error) { this.#executionSubscribers.delete(item); item.subscriber[Symbol.dispose](); throw error; }
+    return new RpcStub({[Symbol.dispose]: () => { this.#executionSubscribers.delete(item); item.subscriber[Symbol.dispose](); }});
+  }
+
+  proposedChangesChanged(_chatId: number) {
+    // Materialized proposal changes advance only identities whose actual inputs changed.
+    // The same durable notification path handles preview and mainline transitions.
+    this.mutateAccepted(() => {});
   }
 
   emitChatDraftUpdate(chatId: number, timestamp: Date,
@@ -2264,31 +2483,13 @@ class OverseerImpl implements AgentHooks {
   //
   // If `chatId` is specified, load the worker including changes proposed in the given chat
   // thread. (The caller is presumed to have verified the chat exists and has proposed changes.)
-  loadGadgetWorker(gadgetId: WorkpieceId, chatId?: number): WorkerStub {
-    let codeVersion = `${this.storage.codeVersion.get()}`;
-    let sequence: number | undefined;
-    if (chatId !== undefined) {
-      sequence = this.storage.nextChatSequences.get(chatId)?.nextSequence || 0;
-      codeVersion += `.${chatId}.${sequence}`;
-    }
-
-    return this.env.LOADER.get(`${this.ctx.id}.${codeVersion}.${gadgetId}`, async () => {
-      let {ydoc} = this.buildYDoc("current");
-
-      if (chatId !== undefined) {
-        this.getProposedChanges(chatId, sequence).forEach(({update}) => {
-          if (update !== undefined) {
-            Y.applyUpdateV2(ydoc, update);
-          }
-        });
-      }
-
-      let modules: Record<string, string> = {};
-      for (let [file, content] of ydoc.getMap<Y.Text>(this.gadgetRootName(gadgetId))) {
-        if (file.endsWith(".js")) {
-          modules[file] = content.toString();
-        }
-      }
+  loadGadgetWorker(gadgetId: WorkpieceId, chatId?: number, captured?: ReturnType<OverseerImpl['executionSnapshot']>): WorkerStub {
+    const sequence = chatId === undefined ? undefined : this.storage.nextChatSequences.get(chatId)?.nextSequence || 0;
+    // Freeze exactly the native executable inputs before the lazy loader callback.
+    // Authored composition data changes source history without replacing live apps.
+    const snapshot = captured ?? this.executionSnapshot(gadgetId, chatId, sequence);
+    return this.env.LOADER.get(`${this.ctx.id}.native2.${gadgetId}.${chatId ?? 'main'}.${snapshot.identity.executionGeneration}`, async () => {
+      const modules = snapshot.modules;
 
       let tailProps: GadgetTailLoopbackProps = {
         chatId,
@@ -2298,14 +2499,11 @@ class OverseerImpl implements AgentHooks {
 
       return {
         // TODO: compatibility date configuration
-        compatibilityDate: "2026-02-01",
-        compatibilityFlags: [
-          // Make ctx.restore() available.
-          "allow_irrevocable_stub_storage",
-        ],
-        mainModule: "server.js",
+        compatibilityDate: snapshot.compatibilityDate,
+        compatibilityFlags: snapshot.compatibilityFlags,
+        mainModule: snapshot.mainModule,
         modules,
-        env: this.getEnvForLoader(gadgetId, {from: "gadget", chatId, gadgetId}, chatId),
+        env: snapshot.env,
         globalOutbound: null,
 
         // TODO: Switch to streaming tails when the workerd log spam issue is fixed.
@@ -2349,18 +2547,20 @@ class OverseerImpl implements AgentHooks {
     // If/when we support hiberation of the overseer, we'll need to do something more
     // sophisticated.
     let facetName = this.gadgetFacetName(gadgetId);
-    let oldChat = this.#runningChatIds.get(gadgetId);
+    const snapshot = this.executionSnapshot(gadgetId, chatId);
+    const running = this.#runningExecutions.get(gadgetId);
     let newChat = chatId ?? null;
-    if (newChat !== oldChat) {
+    if (!running || !this.sameExecution(running, snapshot.identity)) {
       this.ctx.facets.abort(facetName, new Error(
           newChat === null
             ? "Gadget restarted to switch back to main version."
             : "Gadget restarted to test proposed changes."));
       this.#runningChatIds.set(gadgetId, newChat);
+      this.#runningExecutions.set(gadgetId, snapshot.identity);
     }
 
     return this.ctx.facets.get<DurableObject>(facetName, () => {
-      let stub = this.loadGadgetWorker(gadgetId, chatId);
+      let stub = this.loadGadgetWorker(gadgetId, chatId, snapshot);
 
       return {
         class: stub.getDurableObjectClass<any>("Gadget"),
@@ -3152,11 +3352,11 @@ class OverseerImpl implements AgentHooks {
     let codeVersion = this.storage.codeVersion.get() + 1;
     this.storage.codeVersion.put(codeVersion);
     let ids = affectedGadgetIds ?? [...this.storage.gadgets.list()].map(gadget => gadget.id);
-    for (let id of ids) {
-      this.ctx.facets.abort(this.gadgetFacetName(id),
-          new Error("Gadget restarted due to code update."));
+    if (this.#acceptedMutation) {
+      for (const id of ids) this.#acceptedMutation.affectedGadgets.add(id);
+      return codeVersion;
     }
-    this.bumpLastActive();
+    this.mutateAccepted(() => { for (const id of ids) this.#acceptedMutation!.affectedGadgets.add(id); });
     return codeVersion;
   }
 
@@ -6324,7 +6524,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     // A workspace initialized by this version of the code is born at the current schema version;
     // there is nothing to migrate.
-    this.impl.storage.version.put(1);
+    this.impl.storage.version.put(2);
   }
 
   // This workspace's outputs, for the owner to fold into their index. Every registry change and
@@ -7125,9 +7325,159 @@ class WorkspaceContributionImpl extends RpcTarget implements WorkspaceContributi
 }
 
 @validateRpc()
+class CompositionClientImpl extends RpcTarget implements CompositionClient {
+  constructor(private impl: OverseerImpl, private gadgetId: WorkpieceId,
+              private actorId: string, private check: () => void) { super(); }
+
+  async compositionProtocol() {
+    this.check();
+    const registration = this.impl.storage.compositionRegistrations.get(this.gadgetId)!;
+    return {protocol: 2 as const, minimumReader: 2 as const, writesEnabled: registration.writesEnabled,
+      instanceEpoch: registration.instanceEpoch, registrationRevision: registration.registrationRevision};
+  }
+
+  async readComposition() {
+    this.check();
+    const {ydoc, version} = this.impl.buildYDoc('current');
+    try {
+      return {protocol: 2 as const, sourceRevision: version,
+        stateRevision: this.impl.storage.acceptedMutationEpoch.get(),
+        slots: readCompositionState(this.impl.storage, ydoc, this.gadgetId, this.impl.gadgetRootName(this.gadgetId))};
+    } finally { ydoc.destroy(); }
+  }
+
+  async readCompositionOperation(operationId: string): Promise<CompositionReceipt | {state: 'absent'}> {
+    this.check();
+    if (typeof operationId !== 'string' || !operationId || operationId.length > 200) throw new Error('Invalid composition operation identity.');
+    const operation = this.impl.storage.compositionOperations.get(JSON.stringify([this.gadgetId, operationId]));
+    if (!operation) return {state: 'absent'};
+    if (operation.actorId !== this.actorId) throw new Error('Composition operation belongs to a different actor.');
+    await this.impl.ctx.storage.sync();
+    this.check();
+    return operation.result;
+  }
+
+  async applyCompositionChanges(input: CompositionWrite): Promise<CompositionReceipt> {
+    this.check();
+    if (!input || input.protocol !== 2 || typeof input.operationId !== 'string'
+        || !input.operationId || input.operationId.length > 200 || !Array.isArray(input.changes)
+        || input.changes.length === 0 || input.changes.length > 4096) throw new Error('Invalid composition write.');
+    const encoded = canonicalComposition(input);
+    if (new TextEncoder().encode(encoded).byteLength > 16 * 1024 * 1024) throw new Error('Composition write exceeds native message limit.');
+    const fingerprint = createHash('sha256').update(canonicalComposition([
+      'native-composition/2', this.impl.ctx.id.toString(), this.gadgetId, this.actorId, input,
+    ])).digest('hex');
+    const key = JSON.stringify([this.gadgetId, input.operationId]);
+    const previous = this.impl.storage.compositionOperations.get(key);
+    if (previous) {
+      if (previous.actorId !== this.actorId || previous.fingerprint !== fingerprint) throw new Error('Composition operation identity was reused with different content or authority.');
+      await this.impl.ctx.storage.sync();
+      this.check();
+      return previous.result;
+    }
+    if (!this.impl.storage.compositionRegistrations.get(this.gadgetId)?.writesEnabled) throw new Error('Native composition writes are disabled.');
+    let result: CompositionReceipt;
+    try {
+      result = this.impl.mutateAccepted(() => {
+        const {ydoc} = this.impl.buildYDoc('current');
+        try {
+          const before = Y.encodeStateVector(ydoc);
+          applyCompositionToCandidate({storage: this.impl.storage, candidate: ydoc,
+            gadgetId: this.gadgetId, root: this.impl.gadgetRootName(this.gadgetId), changes: input.changes});
+          const sourceRevision = this.impl.updateCode(Y.encodeStateAsUpdateV2(ydoc, before));
+          const accepted = this.impl.buildYDoc('current');
+          let slots;
+          try {
+            const ids = new Set(input.changes.map(change => change.slotId));
+            slots = readCompositionState(this.impl.storage, accepted.ydoc, this.gadgetId,
+              this.impl.gadgetRootName(this.gadgetId)).filter(slot => ids.has(slot.id)).map(({id, token}) => ({id, token}));
+          } finally { accepted.ydoc.destroy(); }
+          const receipt: CompositionReceipt = {operationId: input.operationId, fingerprint, state: 'committed',
+            sourceRevision, stateRevision: this.impl.storage.acceptedMutationEpoch.get() + 1, slots};
+          this.impl.storage.compositionOperations.put({key, gadgetId: this.gadgetId,
+            operationId: input.operationId, actorId: this.actorId, fingerprint, createdAt: Date.now(), result: receipt});
+          return receipt;
+        } finally { ydoc.destroy(); }
+      });
+    } catch (error) {
+      // A synchronous failed native transaction cannot have committed its source.
+      // Keep its terminal evidence separately; a failure of this write is unresolved.
+      result = {operationId: input.operationId, fingerprint, state: 'rejected',
+        reason: error instanceof Error ? error.message : 'Native composition mutation rejected.'};
+      this.impl.storage.transaction(() => this.impl.storage.compositionOperations.put({key,
+        gadgetId: this.gadgetId, operationId: input.operationId, actorId: this.actorId,
+        fingerprint, createdAt: Date.now(), result}));
+    }
+    await this.impl.ctx.storage.sync();
+    this.check();
+    return result;
+  }
+}
+
+@validateRpc()
 class OverseerClientInterface extends RpcTarget implements Overseer {
   #clientProfilePromise: Promise<AiChatAuthorInfo> | undefined;
   #disposed = false;
+
+  async initializeComposition(gadgetId: WorkpieceId, slots: readonly CompositionInitialSlot[]): Promise<RpcStub<CompositionClient>> {
+    if (!this.isOwner || this.#disposed) throw new Error('Only the native workspace owner can initialize its composition.');
+    const gadget = this.impl.getGadgetRecord(gadgetId);
+    if (gadget.pending) throw new Error('Accept this native gadget before initializing its composition.');
+    if (!Array.isArray(slots) || slots.length === 0 || slots.length > 4096) throw new Error('Invalid composition template.');
+    const rules: Record<string, {path: string; serializerId: 'text/1' | 'json/1'}> = Object.create(null);
+    for (const slot of slots) {
+      if (!slot || Object.hasOwn(rules, slot.id) || !(slot.bytes === null || typeof slot.bytes === 'string')) throw new Error('Invalid composition template slot.');
+      rules[slot.id] = {path: slot.path, serializerId: slot.serializerId};
+    }
+    const templateDigest = createHash('sha256').update(canonicalComposition(slots)).digest('hex');
+    const previous = this.impl.storage.compositionRegistrations.get(gadgetId);
+    if (previous) {
+      if (previous.adapterDigest !== templateDigest) throw new Error('This native gadget already holds a different composition.');
+      return this.getComposition(gadgetId);
+    }
+    const registration = {gadgetId, instanceEpoch: crypto.randomUUID(), registrationRevision: 1,
+      adapterId: 'native.authored-state/1', adapterDigest: templateDigest,
+      serializerRegistryDigest: createHash('sha256').update(canonicalComposition(rules)).digest('hex'),
+      schemaVersion: 2 as const, status: 'ready' as const, writesEnabled: false, slots: rules};
+    validateCompositionRegistration(registration);
+    this.impl.mutateAccepted(() => {
+      const {ydoc} = this.impl.buildYDoc('current');
+      try {
+        const before = Y.encodeStateVector(ydoc);
+        const files = ydoc.getMap<Y.Text>(this.impl.gadgetRootName(gadgetId));
+        if ([...files.keys()].some(path => path.startsWith('legion/state/'))) throw new Error('Existing managed source must be recovered explicitly, not replaced by a template.');
+        for (const slot of slots) if (slot.bytes !== null) files.set(slot.path, new Y.Text(slot.bytes));
+        this.impl.storage.compositionRegistrations.put(registration);
+        this.impl.updateCode(Y.encodeStateAsUpdateV2(ydoc, before));
+      } finally { ydoc.destroy(); }
+    });
+    await this.impl.ctx.storage.sync();
+    return this.getComposition(gadgetId);
+  }
+
+  async setCompositionWritesEnabled(gadgetId: WorkpieceId, expected: {instanceEpoch: string; registrationRevision: number; protocol: 2}, enabled: boolean): Promise<void> {
+    if (this.#disposed || !this.isOwner) throw new Error('Only the native workspace owner can configure composition writes.');
+    if (this.impl.getGadgetRecord(gadgetId).pending) throw new Error('Composition is not accepted.');
+    const registration = this.impl.storage.compositionRegistrations.get(gadgetId);
+    if (!registration || registration.status !== 'ready' || expected.protocol !== 2
+        || expected.instanceEpoch !== registration.instanceEpoch
+        || expected.registrationRevision !== registration.registrationRevision) throw new Error('Native composition readiness changed.');
+    const {ydoc} = this.impl.buildYDoc('current');
+    try { readCompositionState(this.impl.storage, ydoc, gadgetId, this.impl.gadgetRootName(gadgetId)); }
+    finally { ydoc.destroy(); }
+    this.impl.mutateAccepted(() => this.impl.storage.compositionRegistrations.put({...registration, writesEnabled: enabled}));
+    await this.impl.ctx.storage.sync();
+  }
+
+  async getComposition(gadgetId: WorkpieceId): Promise<RpcStub<CompositionClient>> {
+    const check = () => {
+      if (this.#disposed || !this.impl.ownerId) throw new Error('Native composition access ended.');
+      if (this.impl.getGadgetRecord(gadgetId).pending) throw new Error('Accept this native gadget before opening its composition.');
+      if (this.impl.storage.compositionRegistrations.get(gadgetId)?.status !== 'ready') throw new Error('Native composition registration is not ready.');
+    };
+    check();
+    return new RpcStub<CompositionClient>(new CompositionClientImpl(this.impl, gadgetId, this.clientProfileId, check));
+  }
 
   constructor(private impl: OverseerImpl,
               private owner: DurableObjectStub<UserDurableObject>,
@@ -8311,8 +8661,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // creation's gadget would already be deleted, and a merged one already promoted), so any
     // merge that promotes also has updates to merge below.
     await this.impl.reconcilePendingGadgets(chatId);
+    const cutoff = mergeThrough;
+    const accepted = this.impl.mutateAccepted(() => {
+      meta = this.impl.assertChatNotActive(chatId);
     for (let gadget of this.impl.listPendingGadgets(chatId)) {
-      if (gadget.pending!.sequence !== undefined && gadget.pending!.sequence <= mergeThrough) {
+      if (gadget.pending!.sequence !== undefined && gadget.pending!.sequence <= cutoff) {
         delete gadget.pending;
         this.impl.storage.gadgets.put(gadget);
       }
@@ -8324,7 +8677,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       let promoted = false;
       for (let edge of Object.values(gadget.bindings)) {
         if (edge.pending?.chatId === chatId && edge.pending.sequence !== undefined &&
-            edge.pending.sequence <= mergeThrough) {
+            edge.pending.sequence <= cutoff) {
           delete edge.pending;
           promoted = true;
         }
@@ -8338,14 +8691,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let updates = this.impl.getProposedChanges(chatId);
 
     // Reduce it to just what we're merging.
-    while (updates.length > 0 && updates[updates.length - 1].sequence > mergeThrough) {
+    while (updates.length > 0 && updates[updates.length - 1].sequence > cutoff) {
       // We're not merging this one.
       updates.pop();
     }
 
     if (updates.length === 0) {
       // Nothing to merge, so this is a no-op.
-      return;
+      return null;
     }
 
     // To detect if this is the first code change, we have to see if there are any changes listed
@@ -8371,7 +8724,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       author: userMeta.profile,
 
       type: "merge",
-      mergeThrough,
+      mergeThrough: cutoff,
       version,
     });
 
@@ -8379,10 +8732,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.impl.storage.chatMeta.put(meta);
     this.impl.recomputeHasProposedChanges(chatId, meta);
 
+      return {isFirstChange, hasCode: codeUpdates.length > 0};
+    });
+    if (!accepted) return;
+    await this.impl.ctx.storage.sync();
+
     // Maybe generate gadget title if this was the first accepted code. (A merge that accepted no
     // code -- creations/binding additions only -- doesn't count: it writes no code version, so
     // the first *code* merge after it still sees isFirstChange and generates the title then.)
-    if (isFirstChange && codeUpdates.length > 0 && userMeta.quickModel) {
+    if (accepted.isFirstChange && accepted.hasCode && userMeta.quickModel) {
       this.impl.generateGadgetTitle(chatId, userMeta.quickModel, userMeta.profile);
     }
     this.impl.recordGadgetAnalytics({
@@ -8848,6 +9206,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 // whether "use" callers may invoke it.
 @validateRpc()
 class UseOverseerInterface extends RpcTarget implements Overseer {
+  async initializeComposition(_gadgetId: WorkpieceId, _slots: readonly CompositionInitialSlot[]): Promise<RpcStub<CompositionClient>> { this.#deny(); }
+  async getComposition(_gadgetId: WorkpieceId): Promise<RpcStub<CompositionClient>> { this.#deny(); }
+  async setCompositionWritesEnabled(_gadgetId: WorkpieceId, _expected: {instanceEpoch: string; registrationRevision: number; protocol: 2}, _enabled: boolean): Promise<void> { this.#deny(); }
+
   constructor(private impl: OverseerImpl,
               private owner: DurableObjectStub<UserDurableObject>,
               private clientUser: DurableObjectStub<UserDurableObject>,
@@ -9108,31 +9470,20 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
       }
     }
 
-    let {ydoc} = this.impl.buildYDoc("current");
-
-    if (chatId !== undefined) {
-      this.impl.getProposedChanges(chatId).forEach(({update}) => {
-        if (update !== undefined) {
-          Y.applyUpdateV2(ydoc, update);
-        }
-      });
-    }
-
-    let file = ydoc.getMap<Y.Text>(this.impl.gadgetRootName(this.id)).get("client.js");
-    if (file) {
-      return { jsCode: file.toString() };
-    } else {
-      return null;
-    }
+    const captured = this.impl.executionSnapshot(this.id, this.impl.executionChat(this.id, chatId));
+    return captured.uiCode === null ? null : {jsCode: captured.uiCode, identity: captured.identity};
   }
 
-  async connectToGadget(chatId?: number): Promise<RpcStub<any>> {
-    this.impl.recordGadgetAnalytics({
-      event_name: "gadget_interaction",
-      user_id: this.clientUser.id.toString(),
-      chat_id: chatId,
-      interaction_type: "gadget_ui_connected",
-    });
+  async subscribeToExecutionIdentity(chatId: number | null, subscriber: RpcStub<(identity: GadgetExecutionIdentity) => void>): Promise<RpcStub<{}>> {
+    return this.impl.subscribeExecution(this.id, chatId, subscriber);
+  }
+
+  async connectToGadget(chatId?: number, expectedIdentity?: GadgetExecutionIdentity): Promise<RpcStub<any>> {
+    const captured = this.impl.executionSnapshot(this.id, this.impl.executionChat(this.id, chatId));
+    if (expectedIdentity && (!this.impl.sameExecution(expectedIdentity, captured.identity)
+        || expectedIdentity.uiGeneration !== captured.identity.uiGeneration)) throw new Error('EXECUTION_REFRESH_REQUIRED');
+    this.impl.recordGadgetAnalytics({event_name: 'gadget_interaction', user_id: this.clientUser.id.toString(),
+      chat_id: chatId, interaction_type: 'gadget_ui_connected'});
     return this.impl.getGadgetFacet(this.id, chatId);
   }
 
@@ -9365,22 +9716,23 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
       this.#deny();
     }
 
-    let {ydoc} = this.impl.buildYDoc("current");
-    let file = ydoc.getMap<Y.Text>(this.impl.gadgetRootName(this.id)).get("client.js");
-    return file ? { jsCode: file.toString() } : null;
+    const captured = this.impl.executionSnapshot(this.id);
+    return captured.uiCode === null ? null : {jsCode: captured.uiCode, identity: captured.identity};
   }
 
-  async connectToGadget(chatId?: number): Promise<RpcStub<any>> {
-    if (chatId !== undefined) {
-      this.#deny();
-    }
+  async subscribeToExecutionIdentity(chatId: number | null, subscriber: RpcStub<(identity: GadgetExecutionIdentity) => void>): Promise<RpcStub<{}>> {
+    if (chatId !== null) this.#deny();
+    return this.impl.subscribeExecution(this.id, null, subscriber);
+  }
 
-    this.impl.recordGadgetAnalytics({
-      event_name: "gadget_interaction",
-      user_id: this.clientUser.id.toString(),
-      interaction_type: "gadget_ui_connected",
-    });
-    return this.impl.getGadgetFacet(this.id, undefined);
+  async connectToGadget(chatId?: number, expectedIdentity?: GadgetExecutionIdentity): Promise<RpcStub<any>> {
+    if (chatId !== undefined) this.#deny();
+    const captured = this.impl.executionSnapshot(this.id);
+    if (expectedIdentity && (!this.impl.sameExecution(expectedIdentity, captured.identity)
+        || expectedIdentity.uiGeneration !== captured.identity.uiGeneration)) throw new Error('EXECUTION_REFRESH_REQUIRED');
+    this.impl.recordGadgetAnalytics({event_name: 'gadget_interaction', user_id: this.clientUser.id.toString(),
+      interaction_type: 'gadget_ui_connected'});
+    return this.impl.getGadgetFacet(this.id);
   }
 
   async exportPdf(chatId?: number): Promise<ReadableStream<Uint8Array>> {

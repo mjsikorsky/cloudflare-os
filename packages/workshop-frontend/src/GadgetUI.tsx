@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Text, Loader, Banner } from '@cloudflare/kumo'
 import { Sparkle } from '@phosphor-icons/react'
 import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
-import { GadgetClient, ConsoleLogEvent } from '@gadgets/workshop-shared/api'
+import { GadgetClient, ConsoleLogEvent, GadgetExecutionIdentity } from '@gadgets/workshop-shared/api'
 
 // We want to inject Cap'n Web into the Gadget. Luckily it has no dependencies, so we can just take
 // the whole module and embed it. We can import the module using ?raw to get a string of the
@@ -140,6 +140,9 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
   const [hasLoaded, setHasLoaded] = useState(false)
   const [isInvalidated, setIsInvalidated] = useState(false)
   const [iframeGeneration, setIframeGeneration] = useState(0)
+  const [executionIdentity, setExecutionIdentity] = useState<GadgetExecutionIdentity | null>(null)
+  const identityRef = useRef<GadgetExecutionIdentity | null>(null)
+  const bundleIdentityRef = useRef<GadgetExecutionIdentity | null>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const prevReloadTriggerRef = useRef(reloadTrigger)
   // Identifies the newest bundle load, so an older one can't write state after being superseded.
@@ -202,6 +205,28 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
   }
 
   useEffect(() => {
+    let active = true
+    const receive = (identity: GadgetExecutionIdentity) => {
+      if (!active) return
+      const old = identityRef.current
+      if (old && JSON.stringify(old) === JSON.stringify(identity)) return
+      identityRef.current = identity
+      setExecutionIdentity(identity)
+      if (old && (old.chatId !== identity.chatId || old.uiGeneration !== identity.uiGeneration)) {
+        ++loadGenerationRef.current
+        suspendGadgetCalls()
+        setIsInvalidated(true)
+      }
+    }
+    const pending = Promise.resolve(gadget.subscribeToExecutionIdentity(chatId ?? null, receive))
+    void pending.catch(() => { if (active) setError('Connection to application updates was lost. Reload to reconnect.') })
+    return () => { active = false; void pending.then(subscription => subscription[Symbol.dispose](), () => {}) }
+  }, [gadget, chatId])
+
+  useEffect(() => {
+    if (executionIdentity && bundleIdentityRef.current &&
+        (executionIdentity.chatId !== bundleIdentityRef.current.chatId ||
+         executionIdentity.uiGeneration !== bundleIdentityRef.current.uiGeneration)) return
     if (!rpcSessionRef.current) {
       if (handshakePendingRef.current !== null) {
         reloadIframe(new Error('Gadget changed during RPC handshake.'))
@@ -212,7 +237,7 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
     const generation = ++connectionGenerationRef.current
     const isCurrent = () => generation === connectionGenerationRef.current
     const pendingStub = suspendGadgetCalls()
-    const replacementPromise = Promise.resolve().then(() => gadget.connectToGadget(chatId))
+    const replacementPromise = Promise.resolve().then(() => gadget.connectToGadget(chatId, identityRef.current ?? undefined))
     void replacementPromise.then(stub => {
       if (!isCurrent()) stub[Symbol.dispose]?.()
     }, () => {})
@@ -239,7 +264,7 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
       }
     }
     void reconnect()
-  }, [gadget, chatId])
+  }, [gadget, chatId, executionIdentity?.executionGeneration, executionIdentity?.chatId])
 
   // Effect to handle reloadTrigger changes (code changes)
   useEffect(() => {
@@ -291,6 +316,18 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
         const bundle = await gadget.getUiBundle(chatId)
         if (!isCurrent()) return
         if (bundle) {
+          const current = identityRef.current
+          if (current && (current.chatId !== bundle.identity.chatId ||
+              current.uiGeneration > bundle.identity.uiGeneration)) {
+            setIsInvalidated(true)
+            setRetryNonce(n => n + 1)
+            return
+          }
+          bundleIdentityRef.current = bundle.identity
+          if (!current || current.executionGeneration <= bundle.identity.executionGeneration) {
+            identityRef.current = bundle.identity
+            setExecutionIdentity(bundle.identity)
+          }
           const html = createSandboxedHtml(bundle.jsCode)
           setSandboxedHtml(html)
         } else {
@@ -318,7 +355,7 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
     }
   // LSP reports an error here, but tsc does not.
   // The LSP error is due to bugs that need to be fixed in Cap'n Web.
-  }, [gadget, isVisible, hasLoaded, isInvalidated, chatId, retryNonce])
+  }, [gadget, isVisible, hasLoaded, isInvalidated, chatId, retryNonce, executionIdentity?.uiGeneration, executionIdentity?.chatId])
 
   // Effect to handle iframe RPC handshake
   useEffect(() => {
@@ -345,7 +382,7 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
           event.source === iframeRef.current?.contentWindow
         try {
           // Open the RPC connection to the gadget's server side
-          gadgetStub = await gadgetRef.current.connectToGadget(chatId)
+          gadgetStub = await gadgetRef.current.connectToGadget(chatId, identityRef.current ?? bundleIdentityRef.current ?? undefined)
           if (!isCurrent()) {
             gadgetStub[Symbol.dispose]?.()
             port.close()
@@ -488,7 +525,7 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
   return (
     <div style={{ height, width: '100%' }}>
       <iframe
-        key={`${reloadTrigger}:${iframeGeneration}`}
+        key={`${bundleIdentityRef.current?.chatId}:${bundleIdentityRef.current?.uiGeneration}:${reloadTrigger}:${iframeGeneration}`}
         ref={iframeRef}
         srcDoc={sandboxedHtml}
         style={{
