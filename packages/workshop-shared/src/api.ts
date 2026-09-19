@@ -1386,6 +1386,10 @@ import type {CompositionClient, CompositionInitialSlot} from './composition';
 export type {CompositionClient, CompositionInitialSlot, CompositionToken, CompositionSlot, CompositionWrite, CompositionReceipt} from './composition';
 
 export interface Overseer extends RpcTarget {
+  /** Reserve the native contribution conversation for one addressed canvas panel.
+   * Retries retain the exact chat and never start a model or naming turn. */
+  createCompositionChat(request: {gadgetId: WorkpieceId; instanceEpoch: string; operationId: string; worldPath: readonly string[]; panelId: string; title: string}): Promise<{chatId: number}>;
+
   /** Create a distinct accepted composition through the native workpiece owner.
    * Repeating the same actor/operation/template returns its original identity;
    * never overwrites another gadget and never invokes a naming model. Writes

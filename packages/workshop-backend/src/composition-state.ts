@@ -33,6 +33,7 @@ export type CompositionCreation = {
 
 /** These collections extend the existing Overseer schema, not another DO. */
 export const compositionCollections = {
+  compositionChats: collection<CompositionCreation & {chatId: number}>()({primaryKey: 'operationId'}),
   compositionCreations: collection<CompositionCreation>()({primaryKey: 'operationId'}),
   compositionRegistrations: collection<CompositionRegistration>()({primaryKey: 'gadgetId'}),
   compositionSlotGuards: collection<CompositionGuard>()({primaryKey: 'key'}),

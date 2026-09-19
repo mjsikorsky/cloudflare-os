@@ -327,6 +327,17 @@ test('native composition saves fence slots, retain retry receipts and validate a
   const recoveredCreation = await workspace.createComposition(invalidCreation);
   assert.notEqual(recoveredCreation.gadgetId, created.gadgetId, 'Failed creation rolls back its claimed binding and native receipt');
   assert.equal(await originalFacet.read(), originalFacetId, 'Creating a composition preserves existing running applications');
+  const panel = {gadgetId: created.gadgetId, instanceEpoch: created.instanceEpoch, operationId: crypto.randomUUID(), worldPath: ['sub', 'nested'], panelId: 'agent', title: 'Native canvas agent'};
+  const [conversation, concurrent] = await Promise.all([workspace.createCompositionChat(panel), workspace.createCompositionChat(panel)]);
+  assert.deepEqual(concurrent, conversation, 'Concurrent creates retain one native conversation');
+  assert.deepEqual(await workspace.createCompositionChat(panel), conversation);
+  await assert.rejects(Promise.resolve(workspace.createCompositionChat({...panel, panelId: 'other'})), /reused/);
+  await assert.rejects(Promise.resolve(workspace.createCompositionChat({...panel, instanceEpoch: 'stale'})), /changed/);
+  const conversationRows = (await workspace.listChats()).filter(chat => chat.id === conversation.chatId);
+  assert.equal(conversationRows.length, 1);
+  assert.equal(conversationRows[0].title, panel.title);
+  assert.equal(conversationRows[0].activeAgent, undefined, 'Creating a view never starts paid native work');
+
   const composition = retain(await workspace.initializeComposition(gadgetId, [
     {id: 'world', path: 'legion/state/world.json', serializerId: 'json/1', bytes: '{"nodes":[]}'},
     {id: 'decor', path: 'legion/state/decor.json', serializerId: 'json/1', bytes: null},

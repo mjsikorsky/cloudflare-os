@@ -3635,6 +3635,7 @@ class OverseerImpl implements AgentHooks {
     responseTargetRegistration?: ExternalMessageResponseTargetRegistration,
     externalChatKey?: string,
     formats?: MessageFormatRef[],
+    compositionCreation?: {operationId: string; actorId: string; fingerprint: string; gadgetId: number; title: string; check(): void},
   ): Promise<number> {
     if (responseTargetRegistration) {
       let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
@@ -3649,12 +3650,25 @@ class OverseerImpl implements AgentHooks {
         initialMessage, (canonicalAttachments?.length ?? 0) > 0);
 
     let chatId!: number;
+    let reused = false;
     let timestamp = this.getChatTimestamp();
     this.ctx.storage.transactionSync(() => {
+      if (compositionCreation) {
+        compositionCreation.check();
+        const previous = this.storage.compositionChats.get(compositionCreation.operationId);
+        if (previous) {
+          if (previous.actorId !== compositionCreation.actorId || previous.fingerprint !== compositionCreation.fingerprint)
+            throw new Error('Composition chat creation identity was reused.');
+          if (!this.storage.chatMeta.get(previous.chatId)) throw new Error('Created native conversation is missing; it cannot be recreated.');
+          chatId = previous.chatId;
+          reused = true;
+          return;
+        }
+      }
       chatId = this.nextChatId();
       let meta: AiChatMetadata = {
         id: chatId,
-        title: "New Chat",   // filled in later by AI
+        title: compositionCreation?.title ?? "New Chat",   // ordinary chats may be named later by AI
         started: timestamp,
         lastActive: timestamp,
       };
@@ -3679,7 +3693,12 @@ class OverseerImpl implements AgentHooks {
       if (externalChatKey) {
         this.storage.externalChats.put({ externalChatKey, chatId });
       }
+      if (compositionCreation) {
+        const {title: _title, check: _check, ...identity} = compositionCreation;
+        this.storage.compositionChats.put({...identity, chatId});
+      }
     });
+    if (reused) return chatId;
 
     if (prepared.message !== undefined && userMeta.aiModel) {
       let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
@@ -7508,6 +7527,34 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return {gadgetId, instanceEpoch: registration.instanceEpoch};
   }
 
+  async createCompositionChat(request: {gadgetId: WorkpieceId; instanceEpoch: string; operationId: string; worldPath: readonly string[]; panelId: string; title: string}): Promise<{chatId: number}> {
+    if (this.#disposed) throw new Error('Native workspace access ended.');
+    if (!request || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(request.operationId)
+        || !Array.isArray(request.worldPath) || request.worldPath.length > 64
+        || request.worldPath.some(part => typeof part !== 'string' || !part || part.length > 512)
+        || typeof request.panelId !== 'string' || !request.panelId || request.panelId.length > 512
+        || typeof request.title !== 'string' || !request.title.trim() || request.title.length > 512) throw new Error('Invalid composition conversation address.');
+    const check = () => {
+      if (this.#disposed) throw new Error('Native workspace access ended.');
+      const registration = this.impl.storage.compositionRegistrations.get(request.gadgetId);
+      if (!registration || registration.status !== 'ready' || registration.instanceEpoch !== request.instanceEpoch)
+        throw new Error('Native composition instance changed.');
+      if (this.impl.getGadgetRecord(request.gadgetId).pending) throw new Error('Native composition is not accepted.');
+    };
+    check();
+    const fingerprint = createHash('sha256').update(canonicalComposition(request)).digest('hex');
+    // This operation creates a human-requested conversation, not execution.
+    // Neither normal AI response nor automatic title generation may run here.
+    const {aiModel: _aiModel, quickModel: _quickModel, ...userMeta} = await this.clientUser.getChatContext(null);
+    check();
+    const chatId = await this.impl.newChat(this.clientUser, userMeta, `Canvas agent: ${request.title}`,
+      undefined, undefined, undefined, undefined, undefined,
+      {operationId: request.operationId, actorId: this.clientProfileId, fingerprint, gadgetId: request.gadgetId, title: request.title, check});
+    await this.impl.ctx.storage.sync();
+    check();
+    return {chatId};
+  }
+
   async registerCompositionSlots(gadgetId: WorkpieceId, slots: readonly CompositionInitialSlot[]): Promise<void> {
     if (this.#disposed) throw new Error('Native build access ended.');
     if (this.impl.getGadgetRecord(gadgetId).pending) throw new Error('Accept the native gadget first.');
@@ -9301,6 +9348,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 // whether "use" callers may invoke it.
 @validateRpc()
 class UseOverseerInterface extends RpcTarget implements Overseer {
+  async createCompositionChat(_request: {gadgetId: WorkpieceId; instanceEpoch: string; operationId: string; worldPath: readonly string[]; panelId: string; title: string}): Promise<{chatId: number}> { this.#deny(); }
   async createComposition(_request: {operationId: string; title: string; slots: readonly CompositionInitialSlot[]}): Promise<{gadgetId: WorkpieceId; instanceEpoch: string}> { this.#deny(); }
   async initializeComposition(_gadgetId: WorkpieceId, _slots: readonly CompositionInitialSlot[]): Promise<RpcStub<CompositionClient>> { this.#deny(); }
   async getComposition(_gadgetId: WorkpieceId): Promise<RpcStub<CompositionClient>> { this.#deny(); }
