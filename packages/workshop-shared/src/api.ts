@@ -1386,6 +1386,12 @@ import type {CompositionClient, CompositionInitialSlot} from './composition';
 export type {CompositionClient, CompositionInitialSlot, CompositionToken, CompositionSlot, CompositionWrite, CompositionReceipt} from './composition';
 
 export interface Overseer extends RpcTarget {
+  /** Create a distinct accepted composition through the native workpiece owner.
+   * Repeating the same actor/operation/template returns its original identity;
+   * never overwrites another gadget and never invokes a naming model. Writes
+   * remain disabled until explicit native compatibility activation. */
+  createComposition(request: {operationId: string; title: string; slots: readonly CompositionInitialSlot[]}): Promise<{gadgetId: WorkpieceId; instanceEpoch: string}>;
+
   /** Explicit owner creation of a managed composition on an existing native gadget.
    * Repeating the identical template returns the same instance without overwriting edits. */
   initializeComposition(gadgetId: WorkpieceId, slots: readonly CompositionInitialSlot[]): Promise<RpcStub<CompositionClient>>;

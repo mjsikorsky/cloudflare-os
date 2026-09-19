@@ -312,6 +312,21 @@ test('native composition saves fence slots, retain retry receipts and validate a
   const originalBundle = await gadget.getUiBundle();
   const originalFacet = retain(await gadget.connectToGadget(undefined, originalBundle.identity));
   const originalFacetId = await originalFacet.read();
+  const creation = {operationId: crypto.randomUUID(), title: 'Preserved composition', slots: [
+    {id: 'source-template', path: 'legion/state/template.json', serializerId: 'json/1', bytes: '{"original":"complete"}'},
+  ]};
+  const created = await workspace.createComposition(creation);
+  assert.notEqual(created.gadgetId, gadgetId, 'Creation must not reuse an unrelated native application');
+  assert.deepEqual(await workspace.createComposition(creation), created, 'Lost create response resolves the original native identity');
+  const createdState = retain(await workspace.getComposition(created.gadgetId));
+  assert.equal((await createdState.compositionProtocol()).writesEnabled, false);
+  assert.equal((await createdState.readComposition()).slots[0].bytes, creation.slots[0].bytes);
+  await assert.rejects(Promise.resolve(workspace.createComposition({...creation, title: 'Changed template'})), /reused/);
+  const invalidCreation = {...creation, operationId: crypto.randomUUID()};
+  await assert.rejects(Promise.resolve(workspace.createComposition({...invalidCreation, slots: [{...creation.slots[0], path: 'server.js'}]})), /Invalid native composition slot rule/);
+  const recoveredCreation = await workspace.createComposition(invalidCreation);
+  assert.notEqual(recoveredCreation.gadgetId, created.gadgetId, 'Failed creation rolls back its claimed binding and native receipt');
+  assert.equal(await originalFacet.read(), originalFacetId, 'Creating a composition preserves existing running applications');
   const composition = retain(await workspace.initializeComposition(gadgetId, [
     {id: 'world', path: 'legion/state/world.json', serializerId: 'json/1', bytes: '{"nodes":[]}'},
     {id: 'decor', path: 'legion/state/decor.json', serializerId: 'json/1', bytes: null},

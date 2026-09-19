@@ -26,8 +26,14 @@ export type CompositionOperation = {
   result: CompositionReceipt;
 };
 
+/** Replay identity for explicit creation; authored bytes remain in native source. */
+export type CompositionCreation = {
+  operationId: string; actorId: string; fingerprint: string; gadgetId: number;
+};
+
 /** These collections extend the existing Overseer schema, not another DO. */
 export const compositionCollections = {
+  compositionCreations: collection<CompositionCreation>()({primaryKey: 'operationId'}),
   compositionRegistrations: collection<CompositionRegistration>()({primaryKey: 'gadgetId'}),
   compositionSlotGuards: collection<CompositionGuard>()({primaryKey: 'key'}),
   compositionOperations: collection<CompositionOperation>()({primaryKey: 'key'}),

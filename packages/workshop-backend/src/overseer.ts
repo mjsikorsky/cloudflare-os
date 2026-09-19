@@ -7435,7 +7435,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   #clientProfilePromise: Promise<AiChatAuthorInfo> | undefined;
   #disposed = false;
 
-  async initializeComposition(gadgetId: WorkpieceId, slots: readonly CompositionInitialSlot[]): Promise<RpcStub<CompositionClient>> {
+  #initializeComposition(gadgetId: WorkpieceId, slots: readonly CompositionInitialSlot[]): void {
     if (!this.isOwner || this.#disposed) throw new Error('Only the native workspace owner can initialize its composition.');
     const gadget = this.impl.getGadgetRecord(gadgetId);
     if (gadget.pending) throw new Error('Accept this native gadget before initializing its composition.');
@@ -7449,7 +7449,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     const previous = this.impl.storage.compositionRegistrations.get(gadgetId);
     if (previous) {
       if (previous.adapterDigest !== templateDigest) throw new Error('This native gadget already holds a different composition.');
-      return this.getComposition(gadgetId);
+      return;
     }
     const registration = {gadgetId, instanceEpoch: crypto.randomUUID(), registrationRevision: 1,
       adapterId: 'native.authored-state/1', adapterDigest: templateDigest,
@@ -7467,8 +7467,45 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         this.impl.updateCode(Y.encodeStateAsUpdateV2(ydoc, before));
       } finally { ydoc.destroy(); }
     });
+
+  }
+
+
+  async initializeComposition(gadgetId: WorkpieceId, slots: readonly CompositionInitialSlot[]): Promise<RpcStub<CompositionClient>> {
+    this.#initializeComposition(gadgetId, slots);
     await this.impl.ctx.storage.sync();
     return this.getComposition(gadgetId);
+  }
+
+  async createComposition(request: {operationId: string; title: string; slots: readonly CompositionInitialSlot[]}): Promise<{gadgetId: WorkpieceId; instanceEpoch: string}> {
+    if (!this.isOwner || this.#disposed) throw new Error('Only the native workspace owner can create its composition.');
+    if (!request || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(request.operationId)
+        || typeof request.title !== 'string' || !request.title.trim() || request.title.length > 512) throw new Error('Invalid composition creation.');
+    const encoded = canonicalComposition(request);
+    if (new TextEncoder().encode(encoded).byteLength > 16 * 1024 * 1024) throw new Error('Composition template exceeds native message limit.');
+    const fingerprint = createHash('sha256').update(encoded).digest('hex');
+    const previous = this.impl.storage.compositionCreations.get(request.operationId);
+    if (previous) {
+      if (previous.actorId !== this.clientProfileId || previous.fingerprint !== fingerprint) throw new Error('Composition creation identity was reused.');
+      this.impl.getGadgetRecord(previous.gadgetId);
+      const registration = this.impl.storage.compositionRegistrations.get(previous.gadgetId);
+      if (!registration) throw new Error('Created composition registration is unavailable.');
+      await this.impl.ctx.storage.sync();
+      if (this.#disposed) throw new Error('Native composition access ended.');
+      return {gadgetId: previous.gadgetId, instanceEpoch: registration.instanceEpoch};
+    }
+    let gadgetId!: WorkpieceId;
+    this.impl.mutateAccepted(() => {
+      const gadget = this.impl.createGadget(request.title, 'CANVAS_' + request.operationId.replaceAll('-', '_'));
+      this.#initializeComposition(gadget.id, request.slots);
+      this.impl.storage.compositionCreations.put({operationId: request.operationId, actorId: this.clientProfileId, fingerprint, gadgetId: gadget.id});
+      gadgetId = gadget.id;
+    });
+    await this.impl.ctx.storage.sync();
+    if (this.#disposed) throw new Error('Native composition access ended.');
+    const registration = this.impl.storage.compositionRegistrations.get(gadgetId);
+    if (!registration) throw new Error('Created composition registration is unavailable.');
+    return {gadgetId, instanceEpoch: registration.instanceEpoch};
   }
 
   async registerCompositionSlots(gadgetId: WorkpieceId, slots: readonly CompositionInitialSlot[]): Promise<void> {
@@ -9264,6 +9301,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 // whether "use" callers may invoke it.
 @validateRpc()
 class UseOverseerInterface extends RpcTarget implements Overseer {
+  async createComposition(_request: {operationId: string; title: string; slots: readonly CompositionInitialSlot[]}): Promise<{gadgetId: WorkpieceId; instanceEpoch: string}> { this.#deny(); }
   async initializeComposition(_gadgetId: WorkpieceId, _slots: readonly CompositionInitialSlot[]): Promise<RpcStub<CompositionClient>> { this.#deny(); }
   async getComposition(_gadgetId: WorkpieceId): Promise<RpcStub<CompositionClient>> { this.#deny(); }
   async registerCompositionSlots(_gadgetId: WorkpieceId, _slots: readonly CompositionInitialSlot[]): Promise<void> { this.#deny(); }
