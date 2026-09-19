@@ -53,7 +53,7 @@ export function canonicalComposition(value: unknown): string {
     return result;
   }
   if (Array.isArray(value)) return '[' + value.map(canonicalComposition).join(',') + ']';
-  return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':'
+  return '{' + Object.keys(value).toSorted().map(k => JSON.stringify(k) + ':'
     + canonicalComposition((value as Record<string, unknown>)[k])).join(',') + '}';
 }
 
@@ -70,7 +70,7 @@ export function validateCompositionRegistration(registration: CompositionRegistr
     if (!id || id.length > 2048 || !rule || typeof rule.path !== 'string'
         || !rule.path.startsWith('legion/state/') || rule.path === indexPath
         || rule.path.split('/').some(part => !part || part === '.' || part === '..')
-        || /[\\\x00-\x1f\x7f]/.test(rule.path) || paths.has(rule.path)
+        || [...rule.path].some(char => char === '\\' || char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) || paths.has(rule.path)
         || !['text/1', 'json/1'].includes(rule.serializerId)) throw new Error('Invalid native composition slot rule.');
     paths.add(rule.path);
   }
@@ -98,7 +98,7 @@ export function prepareCompositionGuards(options: {
       if (!allowed.has(path) || !(value instanceof Y.Text)) throw new Error('Unregistered managed composition source.');
     }
     const projection: Array<{id: string; path: string; serializerId: string; token: CompositionSlotToken}> = [];
-    for (const [id, rule] of Object.entries(registration.slots).sort(([a], [b]) => a.localeCompare(b))) {
+    for (const [id, rule] of Object.entries(registration.slots).toSorted(([a], [b]) => a.localeCompare(b))) {
       const content = files.get(rule.path);
       if (content !== undefined && !(content instanceof Y.Text)) throw new Error('Managed composition source is not text.');
       const bytes = content?.toString() ?? null;

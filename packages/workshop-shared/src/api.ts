@@ -1391,6 +1391,9 @@ export interface Overseer extends RpcTarget {
   initializeComposition(gadgetId: WorkpieceId, slots: readonly CompositionInitialSlot[]): Promise<RpcStub<CompositionClient>>;
   /** Open registered authored state under this workspace session's native authority. */
   getComposition(gadgetId: WorkpieceId): Promise<RpcStub<CompositionClient>>;
+  /** Add previously absent, empty authored slots. Existing paths/serializers and
+   * their concurrency tokens cannot change. Requires native build access. */
+  registerCompositionSlots(gadgetId: WorkpieceId, slots: readonly CompositionInitialSlot[]): Promise<void>;
   /** Explicit owner activation after deployment compatibility and adapter qualification.
    * Checks native readiness; registration alone never enables managed writes. */
   setCompositionWritesEnabled(gadgetId: WorkpieceId, expected: {instanceEpoch: string; registrationRevision: number; protocol: 2}, enabled: boolean): Promise<void>;

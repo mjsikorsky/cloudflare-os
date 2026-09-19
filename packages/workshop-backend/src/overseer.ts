@@ -1561,7 +1561,8 @@ class OverseerImpl implements AgentHooks {
   private migrateCompositionStorage(): void {
     if (this.ownerId === undefined) return;
     this.ctx.storage.transactionSync(() => {
-      for (const gadget of this.storage.gadgets.list()) {
+      const gadgets = [...this.storage.gadgets.list()];
+    for (const gadget of gadgets) {
         if (gadget.pending) continue;
         const key = JSON.stringify([gadget.id, null]);
         if (!this.storage.gadgetExecutions.get(key)) this.storage.gadgetExecutions.put({key,
@@ -2250,7 +2251,7 @@ class OverseerImpl implements AgentHooks {
   private executableFiles(doc: Y.Doc, gadgetId: WorkpieceId): string {
     return JSON.stringify([...doc.getMap<Y.Text>(this.gadgetRootName(gadgetId))]
       .filter(([file]) => file.endsWith('.js'))
-      .map(([file, content]) => [file, content.toString()]).sort(([a], [b]) => a.localeCompare(b)));
+      .map(([file, content]) => [file, content.toString()]).toSorted(([a], [b]) => a.localeCompare(b)));
   }
 
   executionChat(_gadgetId: WorkpieceId, chatId?: number): number | undefined {
@@ -2271,7 +2272,7 @@ class OverseerImpl implements AgentHooks {
       });
       const gadget = this.getGadgetRecord(gadgetId);
       const modules = Object.fromEntries(JSON.parse(this.executableFiles(ydoc, gadgetId))) as Record<string, string>;
-      const bindings = [...this.visibleBindings(gadget, chatId)].map(([name, binding]) => [name, binding.target]).sort(([a], [b]) => String(a).localeCompare(String(b)));
+      const bindings = [...this.visibleBindings(gadget, chatId)].map(([name, binding]) => [name, binding.target]).toSorted(([a], [b]) => String(a).localeCompare(String(b)));
       const branch = chatId ?? null;
       const key = JSON.stringify([gadgetId, branch]);
       const compatibilityDate = '2026-02-01';
@@ -2297,10 +2298,12 @@ class OverseerImpl implements AgentHooks {
   }
 
   private refreshExecutionIdentities() {
-    for (const gadget of [...this.storage.gadgets.list()]) {
+    const gadgets = [...this.storage.gadgets.list()];
+    for (const gadget of gadgets) {
       if (!gadget.pending) this.executionSnapshot(gadget.id);
     }
-    for (const record of [...this.storage.gadgetExecutions.list()]) {
+    const executions = [...this.storage.gadgetExecutions.list()];
+    for (const record of executions) {
       if (record.chatId !== null && this.storage.gadgets.get(record.gadgetId) && this.storage.chatMeta.get(record.chatId)) {
         this.executionSnapshot(record.gadgetId, record.chatId);
       }
@@ -7468,6 +7471,48 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return this.getComposition(gadgetId);
   }
 
+  async registerCompositionSlots(gadgetId: WorkpieceId, slots: readonly CompositionInitialSlot[]): Promise<void> {
+    if (this.#disposed) throw new Error('Native build access ended.');
+    if (this.impl.getGadgetRecord(gadgetId).pending) throw new Error('Accept the native gadget first.');
+    if (!Array.isArray(slots) || !slots.length || slots.length > 4096) throw new Error('Invalid composition slot declaration.');
+    {
+      const previous = this.impl.storage.compositionRegistrations.get(gadgetId);
+      if (!previous || previous.status !== 'ready' || !previous.writesEnabled) throw new Error('Composition is not ready for new authored slots.');
+      const rules = Object.assign(Object.create(null), previous.slots) as typeof previous.slots;
+      const seen = new Set<string>();
+      for (const slot of slots) {
+        if (!slot || typeof slot.id !== 'string' || seen.has(slot.id) || slot.bytes !== null) throw new Error('Declare empty slots; write their contents through native CAS.');
+        seen.add(slot.id);
+        const old = rules[slot.id];
+        if (old && (old.path !== slot.path || old.serializerId !== slot.serializerId)) throw new Error('Existing composition slot rules cannot be replaced.');
+        rules[slot.id] = {path: slot.path, serializerId: slot.serializerId};
+      }
+      const next = {...previous, slots: rules,
+        serializerRegistryDigest: createHash('sha256').update(canonicalComposition(rules)).digest('hex')};
+      validateCompositionRegistration(next);
+      if (next.serializerRegistryDigest === previous.serializerRegistryDigest) {
+        await this.impl.ctx.storage.sync();
+        if (this.#disposed) throw new Error('Native composition access ended.');
+        return;
+      }
+      this.impl.mutateAccepted(() => {
+        const {ydoc} = this.impl.buildYDoc('current');
+        try {
+          const files = ydoc.getMap<Y.Text>(this.impl.gadgetRootName(gadgetId));
+          for (const slot of slots) if (!Object.hasOwn(previous.slots, slot.id) && files.has(slot.path)) throw new Error('New authored slot path already contains source.');
+          this.impl.storage.compositionRegistrations.put(next);
+          // Additive declarations preserve every existing rule/token. The native
+          // index projection and new tombstone guards commit in updateCode's one
+          // transaction; no caller-controlled index or authored bytes are admitted.
+          const emptyUpdate = Y.encodeStateAsUpdateV2(ydoc, Y.encodeStateVector(ydoc));
+          this.impl.updateCode(emptyUpdate);
+        } finally { ydoc.destroy(); }
+      });
+    }
+    await this.impl.ctx.storage.sync();
+    if (this.#disposed) throw new Error('Native composition access ended.');
+  }
+
   async setCompositionWritesEnabled(gadgetId: WorkpieceId, expected: {instanceEpoch: string; registrationRevision: number; protocol: 2}, enabled: boolean): Promise<void> {
     if (this.#disposed || !this.isOwner) throw new Error('Only the native workspace owner can configure composition writes.');
     if (this.impl.getGadgetRecord(gadgetId).pending) throw new Error('Composition is not accepted.');
@@ -9221,6 +9266,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 class UseOverseerInterface extends RpcTarget implements Overseer {
   async initializeComposition(_gadgetId: WorkpieceId, _slots: readonly CompositionInitialSlot[]): Promise<RpcStub<CompositionClient>> { this.#deny(); }
   async getComposition(_gadgetId: WorkpieceId): Promise<RpcStub<CompositionClient>> { this.#deny(); }
+  async registerCompositionSlots(_gadgetId: WorkpieceId, _slots: readonly CompositionInitialSlot[]): Promise<void> { this.#deny(); }
   async setCompositionWritesEnabled(_gadgetId: WorkpieceId, _expected: {instanceEpoch: string; registrationRevision: number; protocol: 2}, _enabled: boolean): Promise<void> { this.#deny(); }
 
   constructor(private impl: OverseerImpl,

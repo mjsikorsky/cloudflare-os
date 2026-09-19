@@ -127,7 +127,7 @@ function fakeGadget(
 ) {
   let identity = {...initialIdentity}
   let observer: ((identity: GadgetExecutionIdentity) => void) | undefined
-  const subscribeToExecutionIdentity = vi.fn(async (_chatId: number | null, callback: (identity: GadgetExecutionIdentity) => void) => {
+  const subscribeToExecutionIdentity = vi.fn<(_chatId: number | null, callback: (identity: GadgetExecutionIdentity) => void) => Promise<Disposable>>(async (_chatId, callback) => {
     observer = callback
     callback(identity)
     return {[Symbol.dispose]() { if (observer === callback) observer = undefined }}

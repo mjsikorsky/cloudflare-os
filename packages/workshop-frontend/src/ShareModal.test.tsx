@@ -208,7 +208,7 @@ describe('ShareModal', () => {
     beforeEach(() => {
       calls = []
       links = []
-      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      globalThis.fetch = vi.fn<typeof fetch>(async (input, init) => {
         const url = String(input)
         calls.push({ url, init })
         const path = new URL(url).pathname

@@ -325,6 +325,16 @@ test('native composition saves fence slots, retain retry receipts and validate a
   const request = {protocol: 2, operationId: crypto.randomUUID(), changes: [change(initial, 'world', '{"nodes":[1]}')]};
   await assert.rejects(Promise.resolve(composition.applyCompositionChanges(request)), /disabled/);
   await workspace.setCompositionWritesEnabled(gadgetId, protocol, true);
+  const newSlot = {id: 'new-world', path: 'legion/state/new-world.json', serializerId: 'json/1', bytes: null};
+  await workspace.registerCompositionSlots(gadgetId, [newSlot]);
+  const extended = await composition.readComposition();
+  assert.deepEqual(extended.slots.filter(slot => slot.id !== 'new-world'), initial.slots, 'Adding a world preserves existing content and CAS tokens');
+  assert.equal(extended.slots.find(slot => slot.id === 'new-world').token.slotRevision, 0);
+  await workspace.registerCompositionSlots(gadgetId, [newSlot]);
+  assert.deepEqual(await composition.readComposition(), extended, 'Lost declaration response can be retried without changing state');
+  await assert.rejects(Promise.resolve(workspace.registerCompositionSlots(gadgetId, [{...newSlot, path: 'legion/state/other.json'}])), /cannot be replaced/);
+  await assert.rejects(Promise.resolve(workspace.registerCompositionSlots(gadgetId, [{...newSlot, id: 'alias'}])), /Invalid native composition slot rule/);
+  assert.equal(await originalFacet.read(), originalFacetId, 'Slot declaration does not restart native applications');
   const committed = await composition.applyCompositionChanges(request);
   assert.equal(committed.state, 'committed');
   assert.deepEqual(await composition.applyCompositionChanges(request), committed);
