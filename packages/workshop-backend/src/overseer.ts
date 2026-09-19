@@ -1059,6 +1059,7 @@ class OverseerImpl implements AgentHooks {
           changes, affectedGadgets: [...effects.affectedGadgets]});
       });
       this.#acceptedNotifications.set(noticeId, () => committed.deliver());
+      this.#updateExternalMessageResponseDeliveryAlarm();
       this.drainAcceptedMutations();
       return committed.value;
     } catch (error) {
@@ -1070,8 +1071,8 @@ class OverseerImpl implements AgentHooks {
 
   /** Native source history is the replay source after a restart. No RPC closures
    * or authored bytes are persisted in the notification outbox. */
-  drainAcceptedMutations(): void {
-    if (this.#acceptedDelivery) return;
+  drainAcceptedMutations(): Promise<void> {
+    if (this.#acceptedDelivery) return this.#acceptedDelivery;
     let failed = false;
     this.#acceptedDelivery = (async () => {
       for (;;) {
@@ -1100,9 +1101,11 @@ class OverseerImpl implements AgentHooks {
       });
     }).finally(() => {
       this.#acceptedDelivery = undefined;
+      this.#updateExternalMessageResponseDeliveryAlarm();
       if (!failed && [...this.storage.acceptedMutationOutbox.list({limit: 1})].length) this.drainAcceptedMutations();
     });
     this.ctx.waitUntil(this.#acceptedDelivery);
+    return this.#acceptedDelivery;
   }
 
   // Per-chat in-memory state for running agents and pending agent callbacks.
@@ -1300,7 +1303,8 @@ class OverseerImpl implements AgentHooks {
   #updateExternalMessageResponseDeliveryAlarm(): void {
     if (this.#runningAgents.size > 0) return;
 
-    // This DO has one alarm shared by agent keep-alive, response-target retry, and delivered-record sweep.
+    // This DO has one alarm shared by agent keep-alive, accepted-source notification
+    // retry, response-target retry, and delivered-record sweep.
     // Recompute from storage whenever the alarm may have been overwritten by another concern.
     this.#sweepDeliveredExternalMessageResponses();
 
@@ -1308,6 +1312,14 @@ class OverseerImpl implements AgentHooks {
       .length > 0;
     if (hasReadyExternalMessageResponse) {
       this.ctx.storage.setAlarm(Date.now());
+      return;
+    }
+
+    // An output/subscriber failure must recover without waiting for another edit
+    // or viewer. Keep the persisted outbox until successful delivery; back off
+    // rather than spinning a failed callback in the same request.
+    if ([...this.storage.acceptedMutationOutbox.list({limit: 1})].length) {
+      this.ctx.storage.setAlarm(Date.now() + 1_000);
       return;
     }
 
@@ -6506,6 +6518,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   // - If the DO dies *while* the alarm is running, the system will retry the alarm, thus resuming
   //   the agents yet again.
   async alarm() {
+    await this.impl.drainAcceptedMutations();
     await this.impl.waitForAllAgentsToComplete();
     await this.impl.deliverReadyExternalMessageResponses();
   }
