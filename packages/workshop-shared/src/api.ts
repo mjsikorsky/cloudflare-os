@@ -24,7 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorAdminActionResult, VendorAdminView, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 
@@ -1155,7 +1155,28 @@ export interface AdminApi {
 
   /** Reorder the menu. `blueprintIds` must be a permutation of the currently promoted ids. */
   setFormatOrder(blueprintIds: string[]): Promise<void>;
+
+  /**
+   * The admin pages bound gatekeeper vendors contribute (VendorDescription.providesAdmin), each
+   * rendered as a tab. A vendor whose page fails to load is returned with `error` instead.
+   */
+  getVendorAdminPages(): Promise<AdminVendorPage[]>;
+
+  /** Run one action on a vendor's admin page (see GatekeeperVendor.runAdminAction). */
+  runVendorAdminAction(vendorId: string, action: string, input: Record<string, string>)
+      : Promise<VendorAdminActionResult>;
 }
+
+/** One vendor's admin page, as the admin UI renders it. */
+export type AdminVendorPage = {
+  vendorId: string;
+  /** The tab title (VendorDescription.providesAdmin.title). */
+  title: string;
+  logo?: AvatarImage;
+  view?: VendorAdminView;
+  /** Set instead of `view` when the vendor could not produce its page. */
+  error?: string;
+};
 
 /** A partial edit to one promoted format. Absent fields are left alone. */
 export type AdminFormatPatch = {

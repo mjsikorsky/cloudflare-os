@@ -77,6 +77,13 @@ export type VendorDescription = {
    * management UI (see AccountDescription.singleton / .providesUi).
    */
   autoProvisionsAccount?: boolean;
+
+  /**
+   * If set, this vendor contributes a page to the deployment's `/admin` (see
+   * GatekeeperVendor.getAdminView / runAdminAction), titled `title`. The Workshop calls those
+   * methods only for vendors that set this flag, and only for a signed-in deployment admin.
+   */
+  providesAdmin?: { title: string };
 }
 
 /**
@@ -554,7 +561,102 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
    * RPC stubs cannot report optional-method presence.
    */
   createAccount?(): Promise<Fetcher<GatekeeperUser>>;
+
+  /**
+   * The vendor's `/admin` page: tables, forms and row actions the Workshop renders as data. Present
+   * only on vendors that set VendorDescription.providesAdmin. The Workshop calls it only for a
+   * deployment admin, over the vendor's service binding, which is the trust boundary: the vendor
+   * holds whatever credentials its operations need and never sees the admin's session.
+   */
+  getAdminView?(context: VendorAdminContext): Promise<VendorAdminView>;
+
+  /**
+   * Run one action from the admin page: a form's submit or a row button. `input` carries the
+   * form's values or the row button's bound values. The result's message is shown to the admin; a
+   * `secret`, such as a newly issued key, is shown once and never stored by the Workshop.
+   */
+  runAdminAction?(action: string, input: Record<string, string>, context: VendorAdminContext)
+      : Promise<VendorAdminActionResult>;
 }
+
+/** Who is acting on a vendor's admin page: the deployment admin's identity, as plain data. */
+export type VendorAdminContext = {
+  /** The admin's user id (usually an email address), for the vendor's own audit trail. */
+  adminUserId: string;
+};
+
+/** A vendor's admin page: sections, each a table with optional forms. */
+export type VendorAdminView = {
+  sections: VendorAdminSection[];
+};
+
+/** One section of a vendor's admin page. */
+export type VendorAdminSection = {
+  /** Stable id, unique within the page. */
+  id: string;
+  title: string;
+  /** Plain text shown under the title. */
+  description?: string;
+  /** Column headings for `rows`. */
+  columns: string[];
+  rows: VendorAdminRow[];
+  /** Shown instead of the table when `rows` is empty. */
+  emptyText?: string;
+  /** Forms shown with the section, such as "Add a firm". */
+  forms?: VendorAdminForm[];
+};
+
+/** One table row: plain-text cells (one per column) and the actions available on it. */
+export type VendorAdminRow = {
+  id: string;
+  cells: string[];
+  actions?: VendorAdminButton[];
+};
+
+/** A form whose submit runs `action` with the field values. */
+export type VendorAdminForm = {
+  action: string;
+  title: string;
+  fields: VendorAdminField[];
+  submitLabel: string;
+};
+
+/**
+ * A row button. It runs `action` with `input` (the values it is bound to, such as the row's id)
+ * merged with any `fields` it asks for first.
+ */
+export type VendorAdminButton = {
+  action: string;
+  label: string;
+  input: Record<string, string>;
+  /** Extra values to ask for before running, such as a label for a new key. */
+  fields?: VendorAdminField[];
+  /** If set, the admin confirms this text before the action runs. */
+  confirm?: string;
+  /** Styles the button as destructive (revoke, delete). */
+  destructive?: boolean;
+};
+
+/** One input of a form or a row button. */
+export type VendorAdminField = {
+  key: string;
+  label: string;
+  kind: "text" | "select";
+  /** Options for `kind: "select"`. */
+  options?: { value: string; label: string }[];
+  placeholder?: string;
+  /** Plain text shown under the input. */
+  help?: string;
+  required?: boolean;
+};
+
+/** What an admin action returns. */
+export type VendorAdminActionResult = {
+  /** Shown to the admin. */
+  message: string;
+  /** A value shown once, with a copy button, such as a newly issued key. The Workshop never stores it. */
+  secret?: { label: string; value: string };
+};
 
 export interface GatekeeperConnectCallback extends WorkerEntrypoint {
   /**

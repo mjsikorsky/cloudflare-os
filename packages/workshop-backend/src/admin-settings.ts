@@ -1,5 +1,5 @@
-import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
-import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
+import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AdminVendorPage, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
+import { GatekeeperVendor, VendorAdminActionResult } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
 import { validateRpc } from 'capnweb-validate';
@@ -471,6 +471,47 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
    * (default stored as absence); an ordinary gatekeeper stores a binary enabled/disabled in
    * disabledGatekeepers and rejects the ambient-only 'optional'.
    */
+  /**
+   * The admin pages of every bound vendor that declares VendorDescription.providesAdmin, in vendor
+   * id order. A vendor whose page fails to load is listed with its error, so one broken vendor does
+   * not hide the others.
+   */
+  async getVendorAdminPages(adminUserId: string): Promise<AdminVendorPage[]> {
+    let pages = await Promise.all([...this.vendors].map(async ([vendorId, vendor]): Promise<AdminVendorPage | null> => {
+      let description;
+      try {
+        description = await vendor.describe();
+      } catch (err) {
+        logger.warn("failed to describe gatekeeper for its admin page", {
+          event: "gatekeeper.admin.describe.failed", gatekeeperId: vendorId, error: err,
+        });
+        return null;
+      }
+      if (!description.providesAdmin) return null;
+      let page = { vendorId, title: description.providesAdmin.title, ...(description.logo ? { logo: description.logo } : {}) };
+      try {
+        // providesAdmin is the vendor's promise that getAdminView exists (RPC stubs cannot report it).
+        return { ...page, view: await adminVendor(vendor).getAdminView({ adminUserId }) };
+      } catch (err) {
+        return { ...page, error: err instanceof Error ? err.message : String(err) };
+      }
+    }));
+    return pages.filter((page): page is AdminVendorPage => page !== null)
+        .toSorted((a, b) => a.vendorId.localeCompare(b.vendorId));
+  }
+
+  /** Run one action on a vendor's admin page. Refused for a vendor that does not provide one. */
+  async runVendorAdminAction(vendorId: string, action: string, input: Record<string, string>,
+                             adminUserId: string): Promise<VendorAdminActionResult> {
+    let vendor = this.vendors.get(vendorId.toLowerCase());
+    if (!vendor || !(await vendor.describe()).providesAdmin) {
+      throw new Error(`"${vendorId}" has no admin page.`);
+    }
+    let result = await adminVendor(vendor).runAdminAction(action, input, { adminUserId });
+    logger.info(`vendor admin action ${action}`, { event: "gatekeeper.admin.action", gatekeeperId: vendorId });
+    return result;
+  }
+
   async setGatekeeperMode(vendorId: string, mode: AmbientGatekeeperMode): Promise<void> {
     vendorId = vendorId.toLowerCase();
     let vendor = this.vendors.get(vendorId);
@@ -561,6 +602,13 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
 // gatekeeper/resource can't be re-enabled via a crafted request, and the client never receives a
 // stub to the DO's internal methods. Covers branding, agent instructions, signups, and gatekeeper
 // connector/resource availability; authentication config stays env-var driven.
+// getAdminView and runAdminAction are optional on GatekeeperVendor; a vendor that sets
+// VendorDescription.providesAdmin implements both, so view it through Required<Pick<...>> (the same
+// pattern as the overseer's gitPull) once that flag has been checked.
+function adminVendor(vendor: Service<GatekeeperVendor>) {
+  return vendor as unknown as Service<GatekeeperVendor & Required<Pick<GatekeeperVendor, "getAdminView" | "runAdminAction">>>;
+}
+
 @validateRpc()
 export class AdminApiImpl extends RpcTarget implements AdminApi {
   /**
@@ -659,5 +707,14 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
 
   setFormatOrder(blueprintIds: string[]): Promise<void> {
     return this.admin.setFormatOrder(blueprintIds);
+  }
+
+  getVendorAdminPages(): Promise<AdminVendorPage[]> {
+    return this.admin.getVendorAdminPages(this.adminUserId);
+  }
+
+  runVendorAdminAction(vendorId: string, action: string, input: Record<string, string>)
+      : Promise<VendorAdminActionResult> {
+    return this.admin.runVendorAdminAction(vendorId, action, input, this.adminUserId);
   }
 }

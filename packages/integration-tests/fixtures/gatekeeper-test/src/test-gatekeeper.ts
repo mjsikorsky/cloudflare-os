@@ -28,7 +28,7 @@ import type {
   AccountDescription, ActionKind, AgentCatalog, ApprovalQueue, ConnectHandoff, Gatekeeper,
   GatekeeperConnectCallback, GatekeeperUser, GatekeeperUserVerifier, HookController, HookInitiator,
   HookTargetMetadata, ResourceDescription, ResourceConfiguratorFrame, SupportedResource,
-  VendorDescription,
+  VendorAdminActionResult, VendorAdminContext, VendorAdminView, VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type {
   ChatGatewayRpcTarget, GadgetResponse, SubmitExternalMessageInput, SubmitExternalMessageResult,
@@ -296,6 +296,9 @@ function control(exports: Cloudflare.Exports): DurableObjectStub<TestControl> {
 type AccountProps = { label: string };
 type BindingProps = AccountProps & { resourceUrl: string; ambient?: true };
 
+// The admin page's items, per isolate: enough for a test that drives the page end to end.
+const adminItems: { name: string; addedBy: string }[] = [];
+
 @validateRpc()
 export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
   async describe(): Promise<VendorDescription> {
@@ -307,7 +310,39 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
       // Accounts are minted on request with no auth flow, which is what keeps these tests about the
       // overseer rather than about somebody's OAuth dance.
       autoProvisionsAccount: true,
+      providesAdmin: { title: "Test admin" },
     };
+  }
+
+  /** The vendor's /admin page: one table of items an admin added, and a form to add one. */
+  async getAdminView(context: VendorAdminContext): Promise<VendorAdminView> {
+    return {
+      sections: [{
+        id: "items",
+        title: "Items",
+        columns: ["Name", "Added by"],
+        rows: adminItems.map(item => ({
+          id: item.name,
+          cells: [item.name, item.addedBy],
+          actions: [{ action: "remove", label: "Remove", input: { name: item.name }, destructive: true }],
+        })),
+        emptyText: `No items yet (viewing as ${context.adminUserId}).`,
+        forms: [{ action: "add", title: "Add an item", submitLabel: "Add", fields: [{ key: "name", label: "Name", kind: "text", required: true }] }],
+      }],
+    };
+  }
+
+  async runAdminAction(action: string, input: Record<string, string>, context: VendorAdminContext): Promise<VendorAdminActionResult> {
+    const name = input.name ?? "";
+    if (action === "add" && name) {
+      adminItems.push({ name, addedBy: context.adminUserId });
+      return { message: `Added ${name}.`, secret: { label: `Key for ${name}`, value: `key-${name}` } };
+    }
+    if (action === "remove") {
+      adminItems.splice(adminItems.findIndex(item => item.name === name), 1);
+      return { message: `Removed ${name}.` };
+    }
+    throw new Error(`Unknown admin action ${action}.`);
   }
 
   /**
