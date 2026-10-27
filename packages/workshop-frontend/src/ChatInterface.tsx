@@ -4951,10 +4951,10 @@ function ChatInterface({
     // Auto-approval target: offer "Always approve this type" only when enabling a rule would
     // actually apply this action -- a tagged action on a connection that the gatekeeper marked
     // auto-approvable. (A non-auto-approvable action stays a manual gate even with a rule; an
-    // auto-approvable action with an existing rule wouldn't still be pending.) Not offered while
-    // restricted.
+    // auto-approvable action with an existing rule wouldn't still be pending.) While restricted, a
+    // rule can still apply to an action that declares its audience, so it is offered for those.
     const autoApproveTarget =
-      !restricted &&
+      (!restricted || log.description.audience !== undefined) &&
       log.gatekeeperId !== undefined && log.description.actionKind !== undefined &&
       log.description.autoApprovable === true
         ? {
@@ -6506,8 +6506,8 @@ function ChatInterface({
         onConfirm={handleDeleteConfirm}
       />
 
-      {/* The workspace latched: the affordance is gone and confirming could only error. */}
-      {!restricted && autoApproveConfirm && (
+      {/* Only reachable from an offered affordance, which restricted mode limits to actions with an audience. */}
+      {autoApproveConfirm && (
         <AutoApproveConfirmDialog
           open
           actionLabel={autoApproveConfirm.actionLabel}

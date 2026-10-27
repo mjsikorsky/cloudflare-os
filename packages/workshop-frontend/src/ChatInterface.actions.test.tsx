@@ -194,7 +194,26 @@ function approveDescribedBy(): string | null {
   }).join('\n')
 }
 
+// A pending action a rule could apply: tagged, auto-approvable, on a connection.
+function ruleable(over: Partial<Record<string, unknown>> = {}) {
+  return entry(1, {
+    gatekeeperId: 3,
+    description: { title: 'Publish', description: 'Publishes.', implementsRevert: false, autoApprovable: true, actionKind: { tag: 'publish', label: 'Publishes' }, ...over },
+  })
+}
+const alwaysApprove = () => [...document.querySelectorAll('button')].filter(b => b.textContent === 'Always approve')
+
 describe('restricted approval', () => {
+  it('offers a rule while restricted only for an action that declares its audience', async () => {
+    await renderPendingCard(ruleable({ audience: { scheme: 'acme.realm', id: 'org_1', label: "Acme's shared layer" } }), { restricted: true })
+    expect(alwaysApprove()).toHaveLength(1)
+  })
+
+  it('offers no rule while restricted for an action with no audience', async () => {
+    await renderPendingCard(ruleable(), { restricted: true })
+    expect(alwaysApprove()).toHaveLength(0)
+  })
+
   it('shows the notice and the full request on a pending card while restricted', async () => {
     await renderPendingCard(pendingLog(), { restricted: true })
 

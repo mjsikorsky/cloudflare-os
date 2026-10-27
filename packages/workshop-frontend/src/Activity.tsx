@@ -234,9 +234,10 @@ export default function Activity({
           <div className="min-h-0 flex-1 overflow-auto">
             {pendingActions.map(record => {
               const autoApproveTarget =
-                // Never auto-approved while restricted, so no rule is offered.
-                !restricted &&
-                record.type === 'action' && record.gatekeeperId !== undefined &&
+                // While restricted only an action with a declared audience can auto-approve.
+                record.type === 'action' &&
+                (!restricted || record.description.audience !== undefined) &&
+                record.gatekeeperId !== undefined &&
                 record.description.actionKind !== undefined &&
                 record.description.autoApprovable === true
                   ? {
@@ -589,8 +590,9 @@ function AutoApprovalPanel({
                     </span>
                     <span className="mt-0.5 block text-[12px] leading-4 tracking-[-0.2px] text-kumo-inactive">
                       {restricted
-                        // Rules don't apply while restricted; say so, but keep them revocable.
-                        ? "Won't apply: this workspace has read sensitive data, so actions always require manual approval."
+                        // While restricted a rule applies only where every sensitive source admits
+                        // the action's audience; say so.
+                        ? 'This workspace has read sensitive data: applies only to actions whose audience every sensitive source admits.'
                         : entry.orphaned
                           ? 'This connection no longer offers this action; the rule still applies.'
                           : entry.enabled
@@ -601,9 +603,7 @@ function AutoApprovalPanel({
                   <Switch
                     size="sm"
                     checked={entry.enabled}
-                    // A rule never fires while restricted, so enabling one is pointless; disabling
-                    // must stay possible.
-                    disabled={busy || (restricted === true && !entry.enabled)}
+                    disabled={busy}
                     aria-label={`${entry.enabled ? 'Disable' : 'Enable'} auto-approval for ${entry.actionKind.label}`}
                     onCheckedChange={enabled => void setEnabled(entry, enabled)}
                   />
@@ -743,6 +743,9 @@ function HistoryRow({
   const resourceUrl = safeExternalUrl(record.resourceUrl)
   const resolvedBy = record.type === 'action' ? record.resolvedBy : undefined
   const autoApproved = record.type === 'action' && record.autoApproved === true
+  // Auto-approved after sensitive data was read: the audience its producers admitted.
+  const admittedAudience = record.type === 'action' && record.audienceAdmittedBy?.length
+    ? record.description.audience?.label : undefined
   const at = actionChangeTime(record)
   const status = activityStatus(record)
 
@@ -789,7 +792,11 @@ function HistoryRow({
             <span className="text-kumo-subtle">{record.resourceTitle}</span>
             {resolvedBy && (
               <ResolverBadge profileId={resolvedBy.id}>
-                {autoApproved ? `Auto-approved (${resolvedBy.name}'s rule)` : `By ${resolvedBy.name}`}
+                {autoApproved
+                  ? admittedAudience
+                    ? `Auto-approved (${resolvedBy.name}'s rule; ${admittedAudience} already sees this data)`
+                    : `Auto-approved (${resolvedBy.name}'s rule)`
+                  : `By ${resolvedBy.name}`}
               </ResolverBadge>
             )}
             {resourceUrl && (
