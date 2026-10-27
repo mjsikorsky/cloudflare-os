@@ -1802,6 +1802,13 @@ export type ActionLogEntry = {
    * clicking Approve. Only ever set alongside state "approved" (there is no automatic rejection).
    */
   autoApproved?: boolean;
+
+  /**
+   * Set when the action auto-approved in a workspace that had observed restricted data: the
+   * gatekeepers that produced that data, every one of which admitted the action's
+   * `ActionDescription.audience`. Absent otherwise.
+   */
+  audienceAdmittedBy?: WorkpieceId[];
 } | {
   type: "observation";
   description: ObservationDescription;

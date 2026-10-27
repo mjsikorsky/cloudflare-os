@@ -873,6 +873,15 @@ export interface Gatekeeper<Session> extends DurableObject {
    */
   removeObserver(id: string): Promise<void>;
 
+  /**
+   * Answers, with no side effects, whether everyone in `audience` can already see the restricted
+   * data this gatekeeper produced (observations it marked `containsRestrictedData`). The kernel asks
+   * every such producer before auto-approving an action in a restricted workspace; any `false`,
+   * throw or absent method keeps the action waiting for a person. Return true only for an audience
+   * this gatekeeper can vouch for, typically the organization that owns the data.
+   */
+  admitsAudience?(audience: ActionAudience): Promise<boolean>;
+
   /** Returns the provider for describe().hasSlashCommands, if supported. */
   getSlashCommandProvider?(): Promise<SlashCommandProvider>;
 
@@ -1214,10 +1223,12 @@ export type ObservationDescription = {
    *   (`ActionDescription.descriptionIsComplete`) is accepted and flagged to the approver; only
    *   git pushes are refused. The kernel does not restrict which connections may be acted on.
    *
-   * TODO(someday): The restricted mode is a blunt instrument. It should be possible to perform
-   *   actions whose visibility is limited to people verified to have access to the same data: an
-   *   action should declare who can see its effects, and each restricted producer verify that
-   *   every such person can already see the data.
+   * One exception narrows the suspension. An action that declares its `ActionDescription.audience`
+   * (who can see its effect) may still auto-approve under a user's rule, when every gatekeeper
+   * that produced restricted data in this workspace answers `Gatekeeper.admitsAudience()` with
+   * true: everyone who will see the effect can already see that data, so nothing leaks. An action
+   * with no audience, or one any producer does not admit, still waits for a person. Public-web
+   * fetches and git pushes stay refused either way.
    */
   containsRestrictedData?: boolean;
 
@@ -1254,6 +1265,20 @@ export type ObservationDescription = {
    */
   excludeObservers?: string[];
 }
+
+/**
+ * Who can see an action's effect, named in a scheme both the acting gatekeeper and a restricted
+ * producer understand. The kernel compares nothing itself: it hands the audience to each producer's
+ * `Gatekeeper.admitsAudience()`.
+ */
+export type ActionAudience = {
+  /** The naming scheme, such as "acme.realm". Producers refuse a scheme they do not know. */
+  scheme: string;
+  /** The audience's identifier within the scheme. */
+  id: string;
+  /** A human-readable name for the audience, shown to approvers and in the activity log. */
+  label: string;
+};
 
 /** The language a `text` action field is written in, named so the approver knows how it is read. */
 export type ActionFieldSyntax = "markdown" | "html" | "sql";
@@ -1425,7 +1450,7 @@ export type ActionDescription = {
   //   the gadget might be influenced by humans to perform actions that said humans couldn't
   //   perform directly.
   // - Which human users might observe the effects of this action? Can be used to track possibility
-  //   of leaking secrets.
+  //   of leaking secrets. (Answered in part by `audience`, below.)
   // - Is this action reversible? Does reversing require manual intervention or is it fully
   //   automatic?
   // - Does this action strictly create content to be viewed (e.g. creating a Jira ticket), or does
@@ -1435,6 +1460,14 @@ export type ActionDescription = {
   // - Does this action modify existing content or only create new content? The former is somewhat
   //   riskier since it could damage existing information whereas posting new content is at worst
   //   an annoyance.
+
+  /**
+   * Who will be able to see this action's effect, when the gatekeeper can say so exactly: for
+   * example, the members of one organization's shared workspace. Absent means unknown. In a
+   * workspace that has observed restricted data, a declared audience is what lets the action
+   * auto-approve: see `ObservationDescription.containsRestrictedData`.
+   */
+  audience?: ActionAudience;
 
   /**
    * The action's kind (stable tag + display label), or absent for actions that can't be matched by
