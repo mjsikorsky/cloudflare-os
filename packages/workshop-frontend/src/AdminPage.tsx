@@ -3,12 +3,13 @@ import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
 import { Hexagon, MagnifyingGlass, ShieldWarning, UserPlus } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from './AuthContext'
-import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
+import { AdminApi, AdminFormat, AdminResourceVendor, AdminVendorPage, AmbientGatekeeperMode, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
 import { applyAccentColor, DEFAULT_ACCENT_COLOR } from './theme'
 import { cacheBustSiteLogoUrl, prepareSiteLogo } from './siteLogoUtils'
 import SiteLogo from './components/SiteLogo'
 import { useDocumentTitle } from './useDocumentTitle'
 import AdminFormatsPanel from './components/format/AdminFormatsPanel'
+import { VendorAdminPanel } from './components/VendorAdminPanel'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
 const ACCENT_PRESETS: { label: string; value: string }[] = [
@@ -89,6 +90,9 @@ export default function AdminPage() {
   // Promoted output formats, in menu order (see AdminFormatsPanel).
   const [formats, setFormats] = useState<AdminFormat[]>([])
 
+  // Admin pages bound gatekeeper vendors contribute (VendorDescription.providesAdmin), one tab each.
+  const [vendorPages, setVendorPages] = useState<AdminVendorPage[]>([])
+
   const resourceKey = (vendorId: string, urlPattern: string) => `${vendorId}\u0000${urlPattern}`
 
   // Populate all editor state from a freshly-fetched settings view.
@@ -133,6 +137,13 @@ export default function AdminPage() {
         stub = api
         setAdmin({ api })
         applySettings(await api.getSettings())
+        // A vendor page that fails is listed with its error; a failure of the whole call leaves the
+        // built-in tabs working.
+        try {
+          if (!cancelled) setVendorPages(await api.getVendorAdminPages())
+        } catch (err) {
+          console.error('Failed to load vendor admin pages:', err)
+        }
       } catch (err) {
         if (!cancelled) {
           console.error('Failed to load admin settings:', err)
@@ -424,8 +435,19 @@ export default function AdminPage() {
           { value: 'gatekeepers', label: 'Gatekeepers' },
           { value: 'formats', label: 'Formats' },
           { value: 'access', label: 'Access' },
+          ...vendorPages.map(page => ({ value: `vendor:${page.vendorId}`, label: page.title })),
         ]}
       />
+
+      {/* Pages contributed by gatekeeper vendors */}
+      {admin && vendorPages.filter(page => activeTab === `vendor:${page.vendorId}`).map(page => (
+        <VendorAdminPanel
+          key={page.vendorId}
+          admin={admin.api}
+          page={page}
+          onChanged={async () => { setVendorPages(await admin.api.getVendorAdminPages()) }}
+        />
+      ))}
 
       {/* Standard output formats */}
       {activeTab === 'formats' && admin && (
