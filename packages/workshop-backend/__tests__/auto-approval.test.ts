@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { AutoApprovalDrainer, AutoApprovalStorage, ApplyPendingActionFn, autoApprovalRule }
-    from "../src/auto-approval.js";
+import { AutoApprovalDrainer, AutoApprovalStorage, ApplyPendingActionFn, autoApprovalDecision,
+  autoApprovalRule, type AudienceCheck } from "../src/auto-approval.js";
 import type { ActionRecord } from "../src/overseer.js";
 import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
-import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
+import type { ActionAudience, ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { makeMockStorage } from "./mock-storage.js";
 import { makeActionStorage, makePreIndexActionStorage, putAction } from "./fixtures.js";
 
@@ -341,14 +341,117 @@ describe("autoApprovalRule", () => {
     expect(autoApprovalRule(storage, GK, eligibleDescription())).toBeUndefined();
   });
 
-  it("refuses every action while the restricted-data latch is set", () => {
+  it("refuses every action without an audience while the restricted-data latch is set", () => {
     let storage = makeStorage();
     enableRule(storage);
     enableRule(storage, "edit", GK + 1);
     storage.containsRestrictedData.put(true);
     // The latch is workspace-wide: every action submitAction lets pend must be read by a human,
-    // on every gatekeeper.
+    // on every gatekeeper, unless it declares who will see its effect.
     expect(autoApprovalRule(storage, GK, eligibleDescription())).toBeUndefined();
     expect(autoApprovalRule(storage, GK + 1, eligibleDescription())).toBeUndefined();
+    // With an audience the synchronous half passes; the producers decide (autoApprovalDecision).
+    expect(autoApprovalRule(storage, GK, eligibleDescription({ audience: AUDIENCE }))?.enabledBy)
+        .toEqual(ENABLER);
+  });
+});
+
+const AUDIENCE: ActionAudience = { scheme: "acme.realm", id: "org_1", label: "Acme's shared layer" };
+const PRODUCER_A = 7;
+const PRODUCER_B = 8;
+
+/** An audience check that answers per producer and records who was asked. */
+function producers(answers: Record<number, boolean | "throw">) {
+  let asked: number[] = [];
+  let admits: AudienceCheck = async (id, audience) => {
+    asked.push(id);
+    expect(audience).toEqual(AUDIENCE);
+    let answer = answers[id];
+    if (answer === "throw") throw new Error("producer unavailable");
+    return answer === true;
+  };
+  return { admits, asked };
+}
+
+describe("autoApprovalDecision", () => {
+  it("outside restricted mode needs no producer and admits with an empty list", async () => {
+    let storage = makeStorage();
+    enableRule(storage);
+    let check = producers({});
+    let decision = await autoApprovalDecision(storage, GK, eligibleDescription(), check.admits);
+    expect(decision).toEqual({ rule: expect.objectContaining({ enabledBy: ENABLER }), admittedBy: [] });
+    expect(check.asked).toEqual([]);
+  });
+
+  it("in restricted mode admits an audience every producer admits, and names them", async () => {
+    let storage = makeStorage();
+    enableRule(storage);
+    storage.containsRestrictedData.put(true);
+    storage.restrictedProducers.put([PRODUCER_A, PRODUCER_B]);
+    let check = producers({ [PRODUCER_A]: true, [PRODUCER_B]: true });
+    let decision = await autoApprovalDecision(
+        storage, GK, eligibleDescription({ audience: AUDIENCE }), check.admits);
+    expect(decision?.admittedBy).toEqual([PRODUCER_A, PRODUCER_B]);
+    expect(check.asked.toSorted()).toEqual([PRODUCER_A, PRODUCER_B]);
+  });
+
+  it("in restricted mode refuses when any producer refuses or throws", async () => {
+    let storage = makeStorage();
+    enableRule(storage);
+    storage.containsRestrictedData.put(true);
+    storage.restrictedProducers.put([PRODUCER_A, PRODUCER_B]);
+    let description = eligibleDescription({ audience: AUDIENCE });
+    expect(await autoApprovalDecision(storage, GK, description,
+        producers({ [PRODUCER_A]: true, [PRODUCER_B]: false }).admits)).toBeUndefined();
+    expect(await autoApprovalDecision(storage, GK, description,
+        producers({ [PRODUCER_A]: true, [PRODUCER_B]: "throw" }).admits)).toBeUndefined();
+  });
+
+  it("in restricted mode refuses without asking when the audience or the producers are unknown", async () => {
+    let storage = makeStorage();
+    enableRule(storage);
+    storage.containsRestrictedData.put(true);
+    let check = producers({ [PRODUCER_A]: true });
+    // Latched before producers were recorded: null means unknown, which admits nothing.
+    expect(storage.restrictedProducers.get()).toBeNull();
+    expect(await autoApprovalDecision(
+        storage, GK, eligibleDescription({ audience: AUDIENCE }), check.admits)).toBeUndefined();
+    storage.restrictedProducers.put([PRODUCER_A]);
+    expect(await autoApprovalDecision(storage, GK, eligibleDescription(), check.admits))
+        .toBeUndefined();
+    expect(check.asked).toEqual([]);
+  });
+});
+
+describe("AutoApprovalDrainer in restricted mode", () => {
+  it("applies an action whose audience every producer admits, recording who admitted it", async () => {
+    let storage = makeStorage();
+    enableRule(storage);
+    putAction(storage, 1, { audience: AUDIENCE });
+    storage.containsRestrictedData.put(true);
+    storage.restrictedProducers.put([PRODUCER_A]);
+    let admittedBy: (number[] | undefined)[] = [];
+    let apply = makeImmediateApply(storage);
+    let applyFn: ApplyPendingActionFn = async (record, resolvedBy, autoApproved, admitted) => {
+      admittedBy.push(admitted);
+      await apply.applyFn(record, resolvedBy, autoApproved);
+    };
+    await new AutoApprovalDrainer(storage, applyFn, producers({ [PRODUCER_A]: true }).admits).drain(GK);
+    expect(apply.calls).toEqual([1]);
+    expect(admittedBy).toEqual([[PRODUCER_A]]);
+    expect(getAction(storage, 1).state).toBe("approved");
+  });
+
+  it("stops at an action a producer does not admit, never skipping ahead", async () => {
+    let storage = makeStorage();
+    enableRule(storage);
+    putAction(storage, 1);                          // no audience: a manual gate
+    putAction(storage, 2, { audience: AUDIENCE });  // admitted, but behind the gate
+    storage.containsRestrictedData.put(true);
+    storage.restrictedProducers.put([PRODUCER_A]);
+    let apply = makeImmediateApply(storage);
+    await new AutoApprovalDrainer(storage, apply.applyFn, producers({ [PRODUCER_A]: true }).admits).drain(GK);
+    expect(apply.calls).toEqual([]);
+    expect(getAction(storage, 2).state).toBe("pending");
   });
 });

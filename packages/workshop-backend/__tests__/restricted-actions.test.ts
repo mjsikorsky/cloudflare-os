@@ -3,7 +3,7 @@
 // Runs against a real OverseerDurableObject (the TEST_OVERSEER binding); records are seeded
 // directly through the impl.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { OverseerDurableObject } from "../src/overseer.js";
@@ -100,6 +100,73 @@ describe("submitAction refusals", () => {
           .rejects.toThrow(/has been removed from this workspace/i);
       expect(actionStates(impl)).toEqual([]);
       expect(impl.storage.nextActionId.get()).toBe(nextActionId);
+    });
+  });
+});
+
+const AUDIENCE = { scheme: "acme.realm", id: "org_1", label: "Acme's shared layer" };
+const ENABLER = { type: "user", id: "enabler@example.com", name: "Enabler" } as const;
+const RESTRICTED_READ = { title: "Read a feed", description: "The test read restricted data.", containsRestrictedData: true };
+
+describe("audience-scoped actions in a restricted workspace", () => {
+  it("records each gatekeeper whose observation set the latch, once", async () => {
+    let stub = env.TEST_OVERSEER.getByName("restricted-producers");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let impl = getImpl(instance);
+      seedGatekeeper(impl, 1);
+      seedGatekeeper(impl, 2);
+      expect(impl.storage.restrictedProducers.get()).toBeNull();
+      await impl.authorizeObservation(1, RESTRICTED_READ, CALLER);
+      await impl.authorizeObservation(2, RESTRICTED_READ, CALLER);
+      await impl.authorizeObservation(1, RESTRICTED_READ, CALLER);
+      await impl.authorizeObservation(2, { title: "Read", description: "Nothing restricted." }, CALLER);
+      expect(impl.storage.containsRestrictedData.get()).toBe(true);
+      expect(impl.storage.restrictedProducers.get()).toEqual([1, 2]);
+    });
+  });
+
+  it("keeps a workspace latched before producers were recorded fully manual", async () => {
+    let stub = env.TEST_OVERSEER.getByName("restricted-producers-legacy");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let impl = getImpl(instance);
+      seedGatekeeper(impl, 1);
+      seedRestrictedObservation(impl, 1, 100);  // the latch alone, as an older workspace has it
+      await impl.authorizeObservation(1, RESTRICTED_READ, CALLER);
+      expect(impl.storage.restrictedProducers.get()).toBeNull();
+    });
+  });
+
+  it("auto-applies an action whose audience every producer admits, and pends one it does not", async () => {
+    let stub = env.TEST_OVERSEER.getByName("restricted-audience");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let impl = getImpl(instance);
+      seedGatekeeper(impl, 1);  // the restricted producer (a feed)
+      seedGatekeeper(impl, 2);  // the acting gatekeeper (a publish)
+      let applied: number[] = [];
+      let asked: unknown[] = [];
+      impl.getGatekeeperFacet = (id: number) => id === 1
+        ? { admitsAudience: async (audience: { id: string }) => { asked.push(audience); return audience.id === "org_1"; } }
+        : { applyAction: async (action: number) => { applied.push(action); } };
+      await impl.authorizeObservation(1, RESTRICTED_READ, CALLER);
+      impl.storage.autoApproveTags.put({ gatekeeperId: 2, actionKind: POKE.actionKind, enabledBy: ENABLER });
+
+      await impl.submitAction(2, 10, { ...POKE, autoApprovable: true, audience: AUDIENCE }, CALLER);
+      // submitAction started the drain in the background (it asks the producer first).
+      await vi.waitFor(() => expect(applied).toEqual([10]));
+      let admitted = [...impl.storage.actions.list()].find((rec: any) => rec.type === "action" && rec.action === 10);
+      expect(admitted).toMatchObject({ state: "approved", autoApproved: true, audienceAdmittedBy: [1] });
+      expect(applied).toEqual([10]);
+      expect(asked).toContainEqual(AUDIENCE);
+
+      // Another realm's audience: the producer refuses, so a person decides.
+      await impl.submitAction(2, 11, { ...POKE, autoApprovable: true, audience: { ...AUDIENCE, id: "org_2" } }, CALLER);
+      // No audience at all: never asked, still manual.
+      await impl.submitAction(2, 12, { ...POKE, autoApprovable: true }, CALLER);
+      await impl.drainAutoApprovals(2);
+      let states = [...impl.storage.actions.list()].filter((rec: any) => rec.type === "action")
+          .map((rec: any) => [rec.action, rec.state]);
+      expect(states).toEqual([[10, "approved"], [11, "pending"], [12, "pending"]]);
+      expect(applied).toEqual([10]);
     });
   });
 });

@@ -6,6 +6,7 @@ import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import type { Collection, Singleton } from "@gadgets/typed-storage";
 import type { Overseer } from "@gadgets/workshop-shared/api";
+import type { ActionAudience } from "@gadgets/workshop-shared/gatekeeper";
 import { OverseerDurableObject, makeOverseerStorage } from "../src/overseer.js";
 import type { ActionRecord } from "../src/overseer.js";
 import { makeMockStorage } from "./mock-storage.js";
@@ -41,7 +42,7 @@ export function putAction(
     id: number,
     opts: { state?: ActionRecord["state"], type?: ActionRecord["type"], gatekeeperId?: number,
             actionTag?: string, autoApprovable?: boolean, createdAt?: Date,
-            appliedAt?: Date } = {}) {
+            appliedAt?: Date, audience?: ActionAudience } = {}) {
   let base = {
     id,
     gatekeeperId: opts.gatekeeperId ?? 1,
@@ -59,6 +60,7 @@ export function putAction(
         implementsRevert: true,
         actionKind: { tag: opts.actionTag ?? "edit", label: "Edits" },
         autoApprovable: opts.autoApprovable ?? true,
+        ...(opts.audience ? { audience: opts.audience } : {}),
       } }
     : type === "observation" ? { ...base, type, description }
     : { ...base, type, description, enabled: true });

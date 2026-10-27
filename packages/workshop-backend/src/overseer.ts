@@ -49,7 +49,7 @@ import { normalizeAgentCatalog } from "./agent-catalog";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord, roleRank }
     from "./sharing";
-import { AutoApprovalDrainer, autoApprovalRule } from "./auto-approval";
+import { AutoApprovalDrainer, autoApprovalDecision, autoApprovalRule, type AudienceCheck } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext } from "./observability";
 import { traceAgentTurn, traceToolApproval } from "./agent-tracing";
@@ -683,6 +683,7 @@ export type ActionRecord = {
   description: ActionDescription;
   resolvedBy?: AiChatAuthorInfo;  // set when resolved (approved/rejected); absent while pending (or legacy)
   autoApproved?: boolean;         // set when applied by an auto-approval rule rather than a human
+  audienceAdmittedBy?: number[];  // set when auto-applied in restricted mode: the producers that admitted its audience
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -1017,6 +1018,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
         description: record.description,
         resolvedBy: record.resolvedBy,
         autoApproved: record.autoApproved,
+        ...(record.audienceAdmittedBy ? {audienceAdmittedBy: record.audienceAdmittedBy} : {}),
       };
     case "bindHook":
       return {
@@ -1160,9 +1162,15 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 
       // True if any past observation was authorized that had the `containsRestrictedData` flag
       // set in its `ObservationDescription`. While set, public-web fetches are refused and every
-      // action pends for manual approval (autoApprovalRule never fires); the approver checks the
-      // action text for restricted data. The key on disk predates the flag's rename.
+      // action pends for manual approval unless it declares an audience every restricted producer
+      // admits (autoApprovalDecision); the approver checks the action text for restricted data.
+      // The key on disk predates the flag's rename.
       containsRestrictedData: singleton(false, {storageKey: "prohibitAllSharing"}),
+
+      // The gatekeepers whose observations set `containsRestrictedData`, asked before an action
+      // with a declared audience auto-approves. Null when unknown: a workspace latched before this
+      // was recorded, whose producers then admit nothing.
+      restrictedProducers: singleton<number[] | null>(null),
 
       // True if any past observation was authorized that had the `ownerInvitesOnly` flag set in
       // its `ObservationDescription`. Share links stop working and only the owner can add
@@ -1988,8 +1996,9 @@ class OverseerImpl implements AgentHooks {
 
     this.#autoApprovalDrainer = new AutoApprovalDrainer(
         this.storage,
-        (record, resolvedBy, autoApproved) =>
-            this.applyPendingAction(record, resolvedBy, autoApproved));
+        (record, resolvedBy, autoApproved, audienceAdmittedBy) =>
+            this.applyPendingAction(record, resolvedBy, autoApproved, audienceAdmittedBy),
+        this.#admitsAudience);
 
     // Mirror every gadget-registry change into the owner's outputs index. Subscribing here makes
     // the registry the single chokepoint, so creation, acceptance, renaming, reverting and
@@ -5389,7 +5398,8 @@ class OverseerImpl implements AgentHooks {
   // requiring them here guarantees the audit log always records the resolving user and whether it
   // was applied automatically. For an auto-approval, `resolvedBy` is the user who enabled the rule.
   async applyPendingAction(record: ActionRecord & {type: "action"},
-                           resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
+                           resolvedBy: AiChatAuthorInfo, autoApproved: boolean,
+                           audienceAdmittedBy?: number[]): Promise<void> {
     let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);
     // The apply-time cache stub is scoped to the gatekeeper AND to this action (approval can
     // happen long after the session that queued it, so the queue-time stub is gone) -- the
@@ -5400,6 +5410,7 @@ class OverseerImpl implements AgentHooks {
     record.appliedAt = new Date();
     record.resolvedBy = resolvedBy;
     record.autoApproved = autoApproved;
+    if (audienceAdmittedBy !== undefined) record.audienceAdmittedBy = audienceAdmittedBy;
     // One durable step for the completion record and the mark conversion (pushed objects are
     // now proven on the remote), so a crash between the push and here strands nothing locally
     // -- the remote side of that window is the gatekeeper's applyAction idempotency
@@ -5430,6 +5441,21 @@ class OverseerImpl implements AgentHooks {
   drainAutoApprovals(gatekeeperId: number): Promise<void> {
     return this.#autoApprovalDrainer.drain(gatekeeperId);
   }
+
+  // Asks a restricted producer whether an audience can already see its data. A gatekeeper that is
+  // gone, lacks the method (the RPC call then throws), or throws admits nothing.
+  #admitsAudience: AudienceCheck = async (producerId, audience) => {
+    if (!this.storage.gatekeepers.get(producerId)) return false;
+    // admitsAudience is optional on Gatekeeper; view the facet through the same Required<Pick<...>>
+    // as gitPull, and let a missing method surface as the throw below.
+    let facet = this.getGatekeeperFacet(producerId) as
+        Fetcher<Gatekeeper<any> & Required<Pick<Gatekeeper<any>, "admitsAudience">>>;
+    try {
+      return (await facet.admitsAudience(audience)) === true;
+    } catch {
+      return false;
+    }
+  };
 
   // Blocks other messages and agent turns for this chat until the returned object is disposed.
   reserveChatMessagePreparation(chatId: number): Disposable {
@@ -5714,6 +5740,13 @@ class OverseerImpl implements AgentHooks {
         ? sharing.computeEffectiveRoles() : undefined;
 
     if (description.containsRestrictedData) {
+      // Record the producer. The first latch starts the list; a workspace latched before producers
+      // were recorded keeps null (unknown), so its restricted mode stays fully manual.
+      let producers = this.storage.containsRestrictedData.get()
+          ? this.storage.restrictedProducers.get() : [];
+      if (producers !== null && !producers.includes(gatekeeperId)) {
+        this.storage.restrictedProducers.put([...producers, gatekeeperId]);
+      }
       this.storage.containsRestrictedData.put(true);
     }
     if (description.ownerInvitesOnly) {
@@ -6042,7 +6075,10 @@ class OverseerImpl implements AgentHooks {
 
     // Same auto-approval gate the drainer uses, named because awaitDecision uses it too. The drain
     // is deferred because applying calls back into the gatekeeper facet still awaiting submitAction.
-    let willAutoApprove = autoApprovalRule(this.storage, gatekeeperId, description) !== undefined;
+    let willAutoApprove = this.storage.containsRestrictedData.get()
+        ? (await autoApprovalDecision(this.storage, gatekeeperId, description, this.#admitsAudience))
+            !== undefined
+        : autoApprovalRule(this.storage, gatekeeperId, description) !== undefined;
     if (!willAutoApprove) this.traceAgentActionApproval(record, "requested");
 
     // Only agent turns suspend on awaitDecision, and only when a manual decision is pending.
