@@ -26,13 +26,28 @@ catalog:
   typescript6: npm:typescript@6.0.3
   # Exact, not ranged: the transform has to stay on esbuild. Oxc does not lower the Stage-3
   # decorators capnweb-validate's `@validateRpc()` relies on (cloudflare/workers-sdk#12626).
-  vite: 7.3.6
-  vite-plus: ^0.2.8
-  vitest: ^4.1.11
+  vite: 7.3.7
+  vite-plus: 1.3.0
+  vitest: ^4.1.12
   wrangler: ^4.138.0
-  zod: ^4.5.4
+  zod: ^4.6.6
 
 overrides:
+  # Patched transitive releases in the existing major-version families.
+  'ip-address@>=10.0.0 <10.7.4': 10.7.4
+  'dompurify@>=3.0.0 <3.4.17': 3.4.17
+  'basic-ftp@<6.2.1': 6.2.1
+  '@modelcontextprotocol/client@>=2.0.0 <2.3.0': 2.3.0
+  # Patch compatible transitive copies, including ontology's exact test dependency.
+  'vitest@<4.1.12': 4.1.12
+  '@vitest/mocker@<4.1.12': 4.1.12
+  'nanoid@>=3.0.0 <3.3.18': 3.3.18
+  'source-map-js@<1.2.2': 1.2.2
+  'tinypool@<2.1.2': 2.1.2
+  # Transfer the reviewed dc-worker #35 fixes to all runtime/tool copies.
+  zod: "catalog:"
+  undici: 7.30.1
+  sharp: 0.35.5
   # Keep the test pool's Wrangler/Miniflare/workerd stack aligned with the workspace toolchain.
   '@cloudflare/vitest-pool-workers>miniflare': "catalog:"
   '@cloudflare/vitest-pool-workers>wrangler': "catalog:"

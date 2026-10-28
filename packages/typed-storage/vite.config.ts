@@ -1,6 +1,6 @@
 // Vite+ per-package settings. The `test` task definition is shared by every package whose tests run
 // under vitest and ships as `@gadgets/scripts/vitest-task`.
-import { withVitestTask } from '@gadgets/scripts/vitest-task'
+import { withVitestTask } from "@gadgets/scripts/vitest-task";
 
 export default withVitestTask(
   {
@@ -20,12 +20,14 @@ export default withVitestTask(
          * input to the packages that bundle it.
          */
         build: {
-          command: 'tsc',
-          input: [{ auto: true }, { pattern: '!dist/**', base: 'package' } as const],
-          output: ['dist/**'],
+          command: "tsc",
+          cache: {
+            input: [{ auto: true }, { pattern: "!dist/**", base: "package" } as const],
+            output: ["dist/**"],
+          },
         },
       },
     },
   },
-  'vitest run',
-)
+  "vitest run",
+);
