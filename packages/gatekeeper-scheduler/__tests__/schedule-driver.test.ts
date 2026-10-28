@@ -719,7 +719,19 @@ describe("ScheduleDriver", () => {
       });
     });
 
-    await runDurableObjectAlarm(driver);
+    // Hold the first batch open so observed overlap does not depend on the
+    // fixture's 10 ms callback delay or the CI runner's scheduling speed.
+    await testEnv.TEST_HOOKS.blockAt("callback");
+    const alarm = runDurableObjectAlarm(driver);
+    try {
+      await vi.waitFor(async () => {
+        const events = (await testEnv.TEST_HOOKS.read()).events;
+        expect(events.filter((event) => event.startsWith("callback:"))).toHaveLength(4);
+      });
+    } finally {
+      await testEnv.TEST_HOOKS.release();
+    }
+    await alarm;
     await vi.waitFor(async () => {
       const events = (await testEnv.TEST_HOOKS.read()).events;
       expect(events.filter((event) => event.startsWith("callback:"))).toHaveLength(21);
