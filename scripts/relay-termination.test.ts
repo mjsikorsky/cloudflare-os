@@ -171,7 +171,10 @@ async function spawnWrapper(
   };
 
   try {
-    assert.ok(await waitForOutput(/^grandchild \d+$/m), "the wrapper never reported both pids");
+    // The wrapper and its child write to the same pipe independently: the
+    // grandchild announcement can arrive before the wrapper's child line.
+    assert.ok(await waitForOutput(/^child \d+$/m) && await waitForOutput(/^grandchild \d+$/m),
+      "the wrapper never reported both pids");
     childPid = Number(/^child (\d+)$/m.exec(text)?.[1] ?? 0);
     grandchildPid = Number(/^grandchild (\d+)$/m.exec(text)?.[1] ?? 0);
     assert.ok(childPid && grandchildPid, "the wrapper never reported both pids");
