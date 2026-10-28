@@ -24,24 +24,26 @@
 
 /** A glob paired with the directory its pattern resolves against. */
 export type GlobWithBase = {
-  pattern: string
-  base: 'package' | 'workspace'
-}
+  pattern: string;
+  base: "package" | "workspace";
+};
 
 /** The subset of a Vite+ task this factory produces. */
 export type VitestTask = {
-  command: string | string[]
-  input: (GlobWithBase | { auto: boolean })[]
-  output: (GlobWithBase | { auto: boolean })[]
-  env: string[]
-}
+  command: string | string[];
+  cache: {
+    input: (GlobWithBase | { auto: boolean })[];
+    output: (GlobWithBase | { auto: boolean })[];
+    env: string[];
+  };
+};
 
 /** A Vite+ config carrying a `run.tasks` map. */
 export type RunTasksConfig = {
   run?: {
-    tasks?: Record<string, unknown>
-  }
-}
+    tasks?: Record<string, unknown>;
+  };
+};
 
 /**
  * Paths vitest itself generates and reads back on the next run, excluded from both the fingerprint
@@ -71,9 +73,9 @@ export type RunTasksConfig = {
  * `.VITE_<NAME>` property access, and a spread of a constant with that prefix reads as one.
  */
 export const VITEST_TOOL_SCRATCH_EXCLUSIONS: GlobWithBase[] = [
-  { pattern: '!**/node_modules/.vite/**', base: 'workspace' },
-  { pattern: '!**/node_modules/.vite-temp/**', base: 'workspace' },
-]
+  { pattern: "!**/node_modules/.vite/**", base: "workspace" },
+  { pattern: "!**/node_modules/.vite-temp/**", base: "workspace" },
+];
 
 /**
  * The randomly-named scratch trees wrangler writes while a worker runs: `tmp/` holds each boot's
@@ -83,9 +85,9 @@ export const VITEST_TOOL_SCRATCH_EXCLUSIONS: GlobWithBase[] = [
  * children.
  */
 export const WRANGLER_RUNTIME_SCRATCH_EXCLUSIONS: GlobWithBase[] = [
-  { pattern: '!**/.wrangler/tmp/**', base: 'workspace' },
-  { pattern: '!**/.wrangler/state/**', base: 'workspace' },
-]
+  { pattern: "!**/.wrangler/tmp/**", base: "workspace" },
+  { pattern: "!**/.wrangler/state/**", base: "workspace" },
+];
 
 /**
  * The default set: the vitest scratch paths plus the whole of `.wrangler`.
@@ -101,8 +103,8 @@ export const WRANGLER_RUNTIME_SCRATCH_EXCLUSIONS: GlobWithBase[] = [
  */
 const DEFAULT_SCRATCH_EXCLUSIONS: GlobWithBase[] = [
   ...VITEST_TOOL_SCRATCH_EXCLUSIONS,
-  { pattern: '!**/.wrangler/**', base: 'workspace' },
-]
+  { pattern: "!**/.wrangler/**", base: "workspace" },
+];
 
 /**
  * A command for one of the builders below: the bare string for the default watchdog thresholds, or
@@ -112,7 +114,7 @@ const DEFAULT_SCRATCH_EXCLUSIONS: GlobWithBase[] = [
  * `vitestTaskWithExclusions` passes it to `Array.prototype.map`, so a second positional parameter
  * would silently receive the index.
  */
-export type TestCommand = string | { command: string; idleSeconds: number }
+export type TestCommand = string | { command: string; idleSeconds: number };
 
 /**
  * Seconds of silence after which a command is considered wedged. A healthy `vitest run` prints a
@@ -123,10 +125,10 @@ export type TestCommand = string | { command: string; idleSeconds: number }
  * execution is quiet for longer, and raises the threshold for itself with the object form of
  * `TestCommand`.
  */
-const IDLE_TIMEOUT_SECONDS = 60
+const IDLE_TIMEOUT_SECONDS = 60;
 
 /** Wall-clock backstop, for a command that stays chatty while looping forever. */
-const TOTAL_TIMEOUT_SECONDS = 600
+const TOTAL_TIMEOUT_SECONDS = 600;
 
 /**
  * Nothing under vitest bounds a wedged run -- its own timeouts are enforced inside the test worker
@@ -156,9 +158,9 @@ const TOTAL_TIMEOUT_SECONDS = 600
  */
 export const withTestTimeout = (command: TestCommand): string => {
   const { command: argv, idleSeconds } =
-    typeof command === 'string' ? { command, idleSeconds: IDLE_TIMEOUT_SECONDS } : command
-  return `gadgets-with-timeout --idle ${idleSeconds} --max ${TOTAL_TIMEOUT_SECONDS} -- ${argv}`
-}
+    typeof command === "string" ? { command, idleSeconds: IDLE_TIMEOUT_SECONDS } : command;
+  return `gadgets-with-timeout --idle ${idleSeconds} --max ${TOTAL_TIMEOUT_SECONDS} -- ${argv}`;
+};
 
 /**
  * The `env` every task wrapping `withTestTimeout` must declare, if it is cached.
@@ -170,7 +172,7 @@ export const withTestTimeout = (command: TestCommand): string => {
  * hand-declared task that wraps `withTestTimeout` spreads it itself, and `scripts/vitest-task.test.ts`
  * checks that each one either does so or is `cache: false`.
  */
-export const TESTS_WITH_TIMEOUT_ENV: string[] = ['TESTS_WITH_TIMEOUT_DISABLE']
+export const TESTS_WITH_TIMEOUT_ENV: string[] = ["TESTS_WITH_TIMEOUT_DISABLE"];
 
 /**
  * The `test` task for a package, given the vitest invocation its `test` script used to hold.
@@ -188,7 +190,7 @@ export function vitestTask(
   command: TestCommand | TestCommand[],
   extraExclusions: GlobWithBase[] = [],
 ): VitestTask {
-  return vitestTaskWithExclusions(command, [...DEFAULT_SCRATCH_EXCLUSIONS, ...extraExclusions])
+  return vitestTaskWithExclusions(command, [...DEFAULT_SCRATCH_EXCLUSIONS, ...extraExclusions]);
 }
 
 /**
@@ -205,10 +207,12 @@ export function vitestTaskWithExclusions(
 ): VitestTask {
   return {
     command: Array.isArray(command) ? command.map(withTestTimeout) : withTestTimeout(command),
-    input: [{ auto: true }, ...exclusions],
-    output: [{ auto: true }, ...exclusions],
-    env: TESTS_WITH_TIMEOUT_ENV,
-  }
+    cache: {
+      input: [{ auto: true }, ...exclusions],
+      output: [{ auto: true }, ...exclusions],
+      env: TESTS_WITH_TIMEOUT_ENV,
+    },
+  };
 }
 
 /**
@@ -225,7 +229,7 @@ export default function vitestTaskViteConfig(
         test: vitestTask(command, extraExclusions),
       },
     },
-  }
+  };
 }
 
 /**
@@ -245,5 +249,5 @@ export function withVitestTask<T extends RunTasksConfig>(
         test: vitestTask(command),
       },
     },
-  }
+  };
 }

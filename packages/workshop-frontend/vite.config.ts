@@ -1,36 +1,37 @@
-import { defineConfig, loadEnv } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-import tsconfigPaths from 'vite-tsconfig-paths'
-import { TanStackRouterVite } from '@tanstack/router-plugin/vite'
-import { vitestTask } from '@gadgets/scripts/vitest-task'
+import { defineConfig, loadEnv } from "vite";
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+import tsconfigPaths from "vite-tsconfig-paths";
+import { TanStackRouterVite } from "@tanstack/router-plugin/vite";
+import { vitestTask } from "@gadgets/scripts/vitest-task";
 
 // `dist/` is this package's own build output, excluded from the inputs of the bundle and test
 // tasks: vp declines to cache a task that reads a path it also wrote. Package-relative rather than
 // workspace-wide -- `typed-storage` emits, and its `exports` resolves to `dist/index.js`, so a
 // pattern matching every package's `dist` would drop a real input.
 const frontendBundleTaskOptions = {
-  dependsOn: ['clean:dist'],
-  env: ['VITE_*'],
-  input: [
-    { auto: true },
-    { pattern: '!dist/**', base: 'package' } as const,
-    // Wrangler's scratch bundles are randomly named, and tracking reaches past the package that
-    // owns the task, so any sibling that ran `wrangler dev` guarantees a miss here. Workspace-wide
-    // for that reason; `build:app` and the shared `test` task exclude the same tree.
-    { pattern: '!**/.wrangler/**', base: 'workspace' } as const,
-  ],
-  output: ['dist/**'],
-}
+  dependsOn: ["clean:dist"],
+  cache: {
+    env: ["VITE_*"],
+    input: [
+      { auto: true },
+      { pattern: "!dist/**", base: "package" } as const,
+      // Wrangler's scratch bundles are randomly named, and tracking reaches past the package that
+      // owns the task, so any sibling that ran `wrangler dev` guarantees a miss here. Workspace-wide
+      // for that reason; `build:app` and the shared `test` task exclude the same tree.
+      { pattern: "!**/.wrangler/**", base: "workspace" } as const,
+    ],
+    output: ["dist/**"],
+  },
+};
 
-const ownDist = { pattern: '!dist/**', base: 'package' } as const
-const viteBuildCommand =
-  `node --input-type=module -e "process.env.NODE_ENV='production'; await (await import('vite')).build()"`
+const ownDist = { pattern: "!dist/**", base: "package" } as const;
+const viteBuildCommand = `node --input-type=module -e "process.env.NODE_ENV='production'; await (await import('vite')).build()"`;
 
 const runConfig = {
   run: {
     tasks: {
-      'clean:dist': {
+      "clean:dist": {
         command: `node --input-type=module -e "import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })"`,
         cache: false,
       },
@@ -50,28 +51,28 @@ const runConfig = {
        * was present before loading this config. The Node launcher is shell-neutral.
        */
       build: {
-        command: ['tsc', 'tsc -p tsconfig.vite.json', viteBuildCommand],
+        command: ["tsc", "tsc -p tsconfig.vite.json", viteBuildCommand],
         ...frontendBundleTaskOptions,
       },
-      'build:assets': {
+      "build:assets": {
         command: viteBuildCommand,
         ...frontendBundleTaskOptions,
       },
-      test: vitestTask('vitest run', [ownDist]),
+      test: vitestTask("vitest run", [ownDist]),
     },
   },
-}
+};
 
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd())
-  const backendHost = env.VITE_BACKEND_HOST?.trim() || 'localhost:8787'
-  const frontendErrorReporting = env.VITE_FRONTEND_ERROR_REPORTING === 'true'
+  const env = loadEnv(mode, process.cwd());
+  const backendHost = env.VITE_BACKEND_HOST?.trim() || "localhost:8787";
+  const frontendErrorReporting = env.VITE_FRONTEND_ERROR_REPORTING === "true";
   return {
     // Spread, not a literal `run: {...}`: `run` is Vite+'s field and vite's own `defineConfig` has
     // no such property, but the excess-property check doesn't reach spreads.
     ...runConfig,
     plugins: [
-      TanStackRouterVite({ target: 'react', autoCodeSplitting: true }),
+      TanStackRouterVite({ target: "react", autoCodeSplitting: true }),
       react(),
       tailwindcss(),
       tsconfigPaths(),
@@ -80,14 +81,14 @@ export default defineConfig(({ mode }) => {
       port: 3000,
       host: true,
       proxy: {
-        '/api/client-errors': `http://${backendHost}`,
-        '/blueprint-screenshot': `http://${backendHost}`,
-        '/api/site-logo': `http://${backendHost}`,
+        "/api/client-errors": `http://${backendHost}`,
+        "/blueprint-screenshot": `http://${backendHost}`,
+        "/api/site-logo": `http://${backendHost}`,
       },
     },
     build: {
       // Production reporting uploads these separately; hidden maps never reveal a map URL to users.
-      sourcemap: frontendErrorReporting ? 'hidden' : false,
+      sourcemap: frontendErrorReporting ? "hidden" : false,
     },
-  }
-})
+  };
+});

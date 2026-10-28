@@ -1,3 +1,4 @@
+/* oxlint-disable react/globals -- Test probes expose hook results to assertions outside React. */
 // @vitest-environment jsdom
 /* eslint-disable react/react-in-jsx-scope */
 

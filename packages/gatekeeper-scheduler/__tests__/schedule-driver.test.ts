@@ -839,6 +839,10 @@ describe("ScheduleDriver", () => {
         },
         activationTime,
       );
+    }
+    // Enable both before making either due: enabling the sibling replans the
+    // alarm and could otherwise deliver "broken" before the failure is injected.
+    for (const scheduleId of ["broken", "healthy"]) {
       await makeActiveScheduleDue(driver, "workspace-a", scheduleId);
     }
     await updateSchedule(driver, "workspace-a", "broken", (stored) => ({
