@@ -3,6 +3,7 @@ import { Text, Loader, Banner } from '@cloudflare/kumo'
 import { Sparkle } from '@phosphor-icons/react'
 import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
 import { GadgetClient, ConsoleLogEvent } from '@gadgets/workshop-shared/api'
+import { GadgetDeviceState, type DeviceStateScope } from './features/gadgets/deviceState'
 
 // We want to inject Cap'n Web into the Gadget. Luckily it has no dependencies, so we can just take
 // the whole module and embed it. We can import the module using ?raw to get a string of the
@@ -117,6 +118,7 @@ const createSandboxedHtml = (jsCode: string): string => {
 
 interface GadgetUIProps {
   gadget: RpcStub<GadgetClient>
+  deviceStateScope?: DeviceStateScope
   height: string
   reloadTrigger?: number
   isVisible?: boolean
@@ -136,10 +138,10 @@ const UI_BUNDLE_LOAD_TIMEOUT_MS = 20_000
 const RECONNECT_TIMEOUT_MS = 5_000
 
 export default function GadgetUI(props: GadgetUIProps) {
-  return <GadgetUISession key={props.chatId} {...props} />
+  return <GadgetUISession key={`${props.chatId}:${props.deviceStateScope?.userId ?? ""}:${props.deviceStateScope?.gadgetId ?? ""}`} {...props} />
 }
 
-function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape, onNoUiChange }: GadgetUIProps) {
+function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape, onNoUiChange }: GadgetUIProps) {
   const [sandboxedHtml, setSandboxedHtml] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -370,8 +372,13 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
           }
           installGadgetStub(gadgetStub)
           // Redirectable target: swapping gadgetStubRef reconnects top-level calls without reloading.
+          const deviceState = new GadgetDeviceState(deviceStateScope, {
+            getItem: key => window.localStorage.getItem(key),
+            setItem: (key, value) => window.localStorage.setItem(key, value),
+          }, isCurrent)
           const forwardingTarget = new Proxy(new RpcTarget() as any, {
             get: (target, property, receiver) => {
+              if (property === 'workshopDeviceState') return deviceState
               if (typeof property === 'symbol' || property in target) {
                 return Reflect.get(target, property, receiver)
               }

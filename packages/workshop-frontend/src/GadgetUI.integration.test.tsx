@@ -176,6 +176,27 @@ describe('GadgetUI RPC recovery', () => {
     return child
   }
 
+  it('provides scoped device preferences through the real iframe RPC handshake and revokes them when reader scope changes', async () => {
+    window.localStorage.clear()
+    const gadget = fakeGadget('device-state', 'document.body.textContent = "device-state"')
+    const render = (userId: string) => root.render(<GadgetUI gadget={gadget.stub} height="100px" deviceStateScope={{userId,gadgetId:17}} />)
+    await act(async () => render('authenticated-reader-a'))
+    await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+    const first = connectIframe(container.querySelector('iframe')!) as any
+    await expect(first.workshopDeviceState.load()).resolves.toEqual({status:'available',value:{}})
+    await expect(first.workshopDeviceState.save({mode:'dark',textScale:1.25})).resolves.toMatchObject({status:'available',value:{mode:'dark'}})
+    await expect(first.workshopDeviceState.storage.getItem('authToken')).rejects.toThrow(/storage|not.*implement|not.*defined/i)
+    await act(async () => render('authenticated-reader-b'))
+    await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+    const second = connectIframe(container.querySelector('iframe')!) as any
+    await expect(second.workshopDeviceState.load()).resolves.toEqual({status:'available',value:{}})
+    await expect(first.workshopDeviceState.save({mode:'light'})).rejects.toThrow(/closed|disposed|shut down/i)
+    await act(async () => render('authenticated-reader-a'))
+    await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+    const restored = connectIframe(container.querySelector('iframe')!) as any
+    await expect(restored.workshopDeviceState.load()).resolves.toMatchObject({status:'available',value:{mode:'dark',textScale:1.25}})
+  })
+
   it('lays out gadget UI against the device-width viewport', async () => {
     const gadget = fakeGadget('responsive', 'document.body.textContent = "responsive"')
     await act(async () => {
