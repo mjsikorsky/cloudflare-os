@@ -4,6 +4,7 @@ import { Sparkle } from '@phosphor-icons/react'
 import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
 import { GadgetClient, ConsoleLogEvent } from '@gadgets/workshop-shared/api'
 import { GadgetDeviceState, type DeviceStateScope } from './features/gadgets/deviceState'
+import { GadgetFileActions } from './features/gadgets/fileActions'
 
 // We want to inject Cap'n Web into the Gadget. Luckily it has no dependencies, so we can just take
 // the whole module and embed it. We can import the module using ?raw to get a string of the
@@ -376,9 +377,11 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
             getItem: key => window.localStorage.getItem(key),
             setItem: (key, value) => window.localStorage.setItem(key, value),
           }, isCurrent)
+          const fileActions = new GadgetFileActions(deviceStateScope, isCurrent)
           const forwardingTarget = new Proxy(new RpcTarget() as any, {
             get: (target, property, receiver) => {
               if (property === 'workshopDeviceState') return deviceState
+              if (property === 'workshopFileActions') return fileActions
               if (typeof property === 'symbol' || property in target) {
                 return Reflect.get(target, property, receiver)
               }
