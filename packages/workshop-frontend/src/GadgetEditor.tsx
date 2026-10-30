@@ -1957,7 +1957,7 @@ export default function GadgetEditor() {
                 <GadgetUI
                   key={selectedGadgetId}
                   gadget={selectedGadgetStub}
-                  deviceStateScope={userInfo && selectedGadgetId != null ? {userId: userInfo.id, gadgetId: selectedGadgetId} : undefined}
+                  deviceStateScope={userInfo && selectedGadgetId != null ? {userId: userInfo.id, workspaceId: metadata.id, gadgetId: selectedGadgetId} : undefined}
                   height="100%"
                   reloadTrigger={uiReloadTrigger}
                   isVisible={activeTab === 'app' && !previewMode}
@@ -2056,7 +2056,7 @@ export default function GadgetEditor() {
             <GadgetUI
               key={selectedGadgetId}
               gadget={selectedGadgetStub}
-                  deviceStateScope={userInfo && selectedGadgetId != null ? {userId: userInfo.id, gadgetId: selectedGadgetId} : undefined}
+                  deviceStateScope={userInfo && selectedGadgetId != null ? {userId: userInfo.id, workspaceId: metadata.id, gadgetId: selectedGadgetId} : undefined}
               height="100%"
               reloadTrigger={uiReloadTrigger}
               isVisible={true}

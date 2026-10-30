@@ -159,7 +159,7 @@ export default function GadgetUseView({
           <GadgetUI
             key={activeId}
             gadget={activeGadget}
-            deviceStateScope={currentUserId && activeId !== null ? {userId: currentUserId, gadgetId: activeId} : undefined}
+            deviceStateScope={currentUserId && activeId !== null ? {userId: currentUserId, workspaceId: metadata.id, gadgetId: activeId} : undefined}
             height="100%"
             isVisible={true}
           />
