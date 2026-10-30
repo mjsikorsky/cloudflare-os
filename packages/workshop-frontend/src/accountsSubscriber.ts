@@ -61,18 +61,25 @@ export function subscribeConnectedAccounts(api: RpcStub<AuthenticatedApi>, subsc
   let disposed = false
   let refreshTimer: ReturnType<typeof setTimeout> | undefined
   let subscription = api.subscribeConnectedAccounts(subscriber, filter)
+  const subscriptions = new Set([subscription])
+  let refreshing = false
+  const close = (value: typeof subscription) => { if (subscriptions.delete(value)) value[Symbol.dispose]() }
   const ready = Promise.resolve(subscription).then(() => {})
   // Callers attach their normal loading/error handler synchronously below.
   void ready.catch(() => {})
   const stop = onConnectedAccountsChanged(() => {
-    if (disposed || refreshTimer !== undefined) return
+    if (disposed || refreshing || refreshTimer !== undefined) return
     refreshTimer = setTimeout(() => {
       refreshTimer = undefined
       if (disposed) return
+      refreshing = true
       const previous = subscription
-      subscription = api.subscribeConnectedAccounts(subscriber, filter)
-      void subscription.catch(error => { if (!disposed) console.error('Failed to refresh connected accounts:', error) })
-      previous[Symbol.dispose]()
+      const next = api.subscribeConnectedAccounts(subscriber, filter)
+      subscriptions.add(next); subscription = next
+      void next.then(() => { refreshing = false; close(previous) }, error => {
+        refreshing = false; close(next)
+        if (!disposed) { subscription = previous; console.error('Failed to refresh connected accounts:', error) }
+      })
     }, 50)
   })
   return {
@@ -80,7 +87,7 @@ export function subscribeConnectedAccounts(api: RpcStub<AuthenticatedApi>, subsc
     [Symbol.dispose]() {
       if (disposed) return
       disposed = true; stop(); if (refreshTimer !== undefined) clearTimeout(refreshTimer)
-      subscription[Symbol.dispose]()
+      for (const value of subscriptions) close(value)
     },
   }
 }
