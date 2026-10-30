@@ -587,8 +587,13 @@ export default function GatekeeperModal({
   const handleConnectAccount = async (vendorId: string, resourceUrlPatterns?: string[]) => {
     setConnectingVendor(vendorId)
     try {
-      openConnectWindow(await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns))
-      toasts.add({ title: 'Complete the account connection in the pop-up window.', variant: 'success' })
+      const vendor = vendors.find(candidate => candidate.id === vendorId)
+      if (vendor?.description.autoProvisionsAccount) {
+        await authenticatedApi.provisionAmbientAccount(vendorId)
+      } else {
+        openConnectWindow(await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns))
+        toasts.add({ title: 'Complete the account connection in the pop-up window.', variant: 'success' })
+      }
     } catch (error) {
       console.error('Failed to initiate connection:', error)
       reportIssue('gatekeeper.connect-start', error, { gatekeeperVendorId: vendorId })
