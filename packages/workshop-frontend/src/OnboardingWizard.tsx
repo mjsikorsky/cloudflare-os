@@ -139,35 +139,18 @@ export default function OnboardingWizard({
     fetchModels()
   }, [fetchModels])
 
-  // Load vendors and subscribe to connected accounts.
-  // We use a url→vendorId lookup map (built from listGatekeeperVendors) so the
-  // subscriber can resolve vendor IDs reliably instead of guessing from display names.
+  // Account events carry the actual adapter identity; two adapters may share a homepage.
   useEffect(() => {
     let cancelled = false
-    const connectedUrls = new Set<string>()
-    const accountIdToUrl = new Map<number, string>()
-
-    // Lookup populated by listGatekeeperVendors, used by the subscriber.
-    const urlToVendorId = new Map<string, string>()
-    // Pending accounts that arrived before the vendor list loaded.
-    const pendingUrls: string[] = []
-
+    const accountVendors = new Map<number, string>()
     const refreshConnectedIds = () => {
-      const ids = new Set<string>()
-      for (const url of connectedUrls) {
-        const vid = urlToVendorId.get(url)
-        if (vid) ids.add(vid)
-      }
-      if (!cancelled) setConnectedVendorIds(ids)
+      if (!cancelled) setConnectedVendorIds(new Set(accountVendors.values()))
     }
 
     authenticatedApi
       .listGatekeeperVendors()
       .then((vendorList) => {
         if (cancelled) return
-        for (const v of vendorList) {
-          urlToVendorId.set(v.description.url, v.id)
-        }
         setVendors(
           vendorList.map((v) => ({
             id: v.id,
@@ -175,8 +158,6 @@ export default function OnboardingWizard({
             logoKey: VENDOR_LOGO_MAP[v.id] ?? v.id.toLowerCase(),
           })),
         )
-        // Resolve any accounts that arrived before the vendor list.
-        if (pendingUrls.length > 0) refreshConnectedIds()
       })
       .catch((err) => {
         console.error('Failed to load vendors:', err)
@@ -186,25 +167,15 @@ export default function OnboardingWizard({
       })
 
     const subscriber = new AccountsSubscriberAdapter({
-      add({ id, vendor }) {
+      add({ id, vendorId }) {
         if (cancelled) return
-        const url = vendor.url
-        accountIdToUrl.set(id, url)
-        connectedUrls.add(url)
-        if (urlToVendorId.size > 0) {
-          refreshConnectedIds()
-        } else {
-          pendingUrls.push(url)
-        }
+        if (vendorId) accountVendors.set(id, vendorId)
+        else accountVendors.delete(id)
+        refreshConnectedIds()
       },
       remove(id) {
-        const url = accountIdToUrl.get(id)
-        if (url) {
-          accountIdToUrl.delete(id)
-          const stillHas = Array.from(accountIdToUrl.values()).includes(url)
-          if (!stillHas) connectedUrls.delete(url)
-          refreshConnectedIds()
-        }
+        accountVendors.delete(id)
+        refreshConnectedIds()
       },
     })
 
