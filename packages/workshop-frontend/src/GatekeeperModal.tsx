@@ -203,6 +203,9 @@ export default function GatekeeperModal({
   const [reconnectingAccountId, setReconnectingAccountId] = useState<number | null>(null)
   const [accounts, setAccounts] = useState<AccountOption[]>([])
   const [vendors, setVendors] = useState<VendorOption[]>([])
+  const [vendorsLoading, setVendorsLoading] = useState(true)
+  const [accountsLoading, setAccountsLoading] = useState(true)
+  const [accountsError, setAccountsError] = useState(false)
 
   const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>([])
   const [selectedModelId, setSelectedModelId] = useState<string | undefined>()
@@ -365,6 +368,7 @@ export default function GatekeeperModal({
     setConnectingVendor(null)
     setReconnectingAccountId(null)
     setVendors([])
+    setVendorsLoading(true)
     setSelectedAccountId(null)
     updateConfiguratorFrameState(null)
     setConfiguratorLoading(false)
@@ -398,8 +402,10 @@ export default function GatekeeperModal({
     authenticatedApi.listGatekeeperVendors().then(vendors => {
       if (cancelled) return
       setVendors(vendors)
+      setVendorsLoading(false)
     }).catch(err => {
       if (cancelled) return
+      setVendorsLoading(false)
       console.error('Failed to load connection vendors:', err)
       reportIssue('gatekeeper.vendors-load', err)
       toasts.add({ title: "Couldn't load connection options", variant: 'error' })
@@ -414,8 +420,12 @@ export default function GatekeeperModal({
     if (!open) return
     let cancelled = false
     const accountMap = new Map<number, AccountOption>()
+    setAccountsLoading(true)
+    setAccountsError(false)
+    setAccounts([])
 
     const subscriber = new AccountsSubscriberAdapter({
+      ready() { if (!cancelled) setAccountsLoading(false) },
       add({ id, description, vendor, supportedResources, credentialsValid, vendorId }) {
         if (cancelled) return
         accountMap.set(id, { id, description, vendorId, vendorDescription: vendor, supportedResources, credentialsValid })
@@ -430,6 +440,8 @@ export default function GatekeeperModal({
     const subscription = subscribeConnectedAccounts(authenticatedApi, subscriber, {includeForcedAutoProvisionedAccounts:true})
     subscription.catch(error => {
       if (cancelled) return
+      setAccountsLoading(false)
+      setAccountsError(true)
       logRpcFailure('Failed to subscribe to connected accounts:', error)
     })
 
@@ -907,11 +919,13 @@ export default function GatekeeperModal({
             </div>
 
             <div className="new-gatekeeper-scroll min-h-0 flex-1 overflow-y-auto px-5 py-4">
+              {(vendorsLoading || accountsLoading) && <p role="status" className="pb-3 text-[13px] text-kumo-subtle">Loading services and connected accounts…</p>}
+              {accountsError && <p role="status" className="pb-3 text-[13px] text-kumo-subtle">Connected accounts could not be loaded. Reopen this picker to retry.</p>}
               <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
                 {isSearching ? (
                   filteredConnections.length === 0 ? (
                     <div className="px-4 py-8 text-center text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-                      No matching connection types.
+                      {vendorsLoading || accountsLoading ? 'Checking connection options…' : 'No matching connection types.'}
                     </div>
                   ) : filteredConnections.map((connection, index) => (
                     <ConnectionTypeRow
@@ -924,7 +938,7 @@ export default function GatekeeperModal({
                 ) : (
                   groupedConnections.length === 0 ? (
                     <div className="px-4 py-8 text-center text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-                      No connection types available.
+                      {vendorsLoading || accountsLoading ? 'Checking connection options…' : 'No connection types available.'}
                     </div>
                   ) : groupedConnections.map((group, index) => (
                     <ConnectionGroupRow
