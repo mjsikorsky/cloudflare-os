@@ -194,15 +194,22 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     if (!authenticatedApi) return
     setConnectingVendor(vendorId)
     try {
-      openConnectWindow(await authenticatedApi.connectAccount(vendorId))
-      toasts.add({ title: 'Complete the account connection in the pop-up window.', variant: 'success' })
+      const vendor = vendorById.get(vendorId.toLowerCase())
+      if (!vendor) throw new Error('The selected service is no longer available')
+      if (vendor.description.autoProvisionsAccount) {
+        await authenticatedApi.provisionAmbientAccount(vendor.id)
+        toasts.add({ title: 'Service connected.', variant: 'success' })
+      } else {
+        openConnectWindow(await authenticatedApi.connectAccount(vendor.id))
+        toasts.add({ title: 'Complete the account connection in the pop-up window.', variant: 'success' })
+      }
     } catch (err) {
       console.error('Failed to initiate connection:', err)
       toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
     } finally {
       setConnectingVendor(null)
     }
-  }, [authenticatedApi, toasts])
+  }, [authenticatedApi, toasts, vendorById])
 
   const handleReconnectAccount = useCallback(async (accountId: number) => {
     if (!authenticatedApi) return
