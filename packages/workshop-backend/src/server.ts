@@ -1,5 +1,6 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
+import type { GadgetAccessConfiguration } from "@gadgets/workshop-shared/api";
 import type { JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
@@ -467,7 +468,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async newGadgetFromBlueprint(
     blueprintId: string,
-    bindings: Record<string, BlueprintBindingAssignment>
+    bindings: Record<string, BlueprintBindingAssignment>,
+    access?: GadgetAccessConfiguration
   ): Promise<RpcStub<Overseer>> {
     // 1. Read blueprint from KV.
     let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
@@ -486,7 +488,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let overseerDo = this.overseers.get(this.overseers.idFromString(id));
     await overseerDo.initializeFromBlueprint(codeBytes, kvRecord.metadata.title,
         deploymentOutputForBlueprint(await readAdminConfig(this.env), blueprintId,
-            sanitizeBlueprintOutput(kvRecord.metadata.output)));
+            sanitizeBlueprintOutput(kvRecord.metadata.output)), access);
 
     // 5. Create gatekeepers from assignments and bind them into the workspace's (only) gadget.
     let metadata = await overseerResult.getMetadata();

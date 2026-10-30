@@ -37,6 +37,8 @@ import ObserverConfigModal from './ObserverConfigModal'
 import WorkpieceCodeInterface from './features/code/WorkpieceCodeInterface'
 import GadgetUI from './GadgetUI'
 import GadgetUseView from './GadgetUseView'
+import GadgetAccessControl from './features/gadgets/GadgetAccessControl'
+import GadgetInstanceCreate from './features/gadgets/GadgetInstanceCreate'
 import Connections from './Connections'
 import Activity, { type ActivityView } from './Activity'
 import { CountBadge } from './components/CountBadge'
@@ -1593,6 +1595,8 @@ export default function GadgetEditor() {
 
         </div>
         <div className="ml-1 flex shrink-0 items-center gap-2">
+          <GadgetAccessControl gadget={selectedGadgetStub} />
+          <GadgetInstanceCreate api={authenticatedApi} overseer={overseer.stub} onCreated={handleSelectWorkpiece} />
           <span className="md:hidden">{showReconnecting && <ReconnectingChip />}</span>
           {/* Desktop reaches Export from the gadget pane's tab bar, which is hidden on phones. */}
           <span className="md:hidden">

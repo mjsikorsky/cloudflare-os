@@ -983,6 +983,22 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async listOutputs(): Promise<ListOutputsResult> {
     let catchingUp = await this.#backfillOutputs();
+    // Shared indexes are a cache, never an authority for a title which may since have been locked.
+    // Drop stale rows before awaiting current workspace visibility; an unavailable workspace
+    // contributes nothing rather than returning metadata from a previously admitted session.
+    const profile = this.storage.profile.get();
+    const shared = [...this.storage.gadgets.list()].filter(record => record.owner && isFullyCreated(record));
+    await Promise.all(shared.map(async record => {
+      this.storage.outputs.byWorkspace.delete(record.id);
+      if (!profile) return;
+      try {
+        const namespace = this.ctx.exports.OverseerDurableObject;
+        const entries = await namespace.get(namespace.idFromString(record.id)).getSharedOutputsForIndex(profile.id);
+        this.syncWorkspaceOutputs(record.id, entries);
+      } catch (error) {
+        logger.warn("failed to refresh shared output visibility", {event: "outputs.visibility.failed", error});
+      }
+    }));
     return {outputs: this.#readOutputs(), catchingUp};
   }
 

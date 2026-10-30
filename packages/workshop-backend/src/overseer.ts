@@ -1,3 +1,5 @@
+import { gadgetAccessHash, assertGadgetAccess, guardGadgetExport } from "./gadget-access";
+import type { GadgetAccessConfiguration } from "@gadgets/workshop-shared/api";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime } from '@gadgets/workshop-shared/api';
@@ -306,6 +308,10 @@ type BindingRecord = {
  * `gatekeeper${id}` can never collide either.
  */
 export type GadgetRecord = {
+  /** OS admission digest. Absent is the historical workspace-shared policy. Never a raw key. */
+  accessKeyHash?: string;
+  /** Changes whenever admission changes; sealed into runtime restoration descriptors. */
+  accessRevision?: number;
   type: "gadget";
   id: WorkpieceId;
   title: string;
@@ -2380,7 +2386,7 @@ class OverseerImpl implements AgentHooks {
   // a permanent creation's caller records its own workpiece_created, naming its source.
   createGadget(title: string, bindingName: string, chatId?: number,
                output?: BlueprintOutput, initialCommitId?: string,
-               actorUserId?: string): GadgetRecord {
+               actorUserId?: string, accessKeyHash?: string): GadgetRecord {
     title = title.trim();
     if (!title) {
       throw new Error("A gadget requires a non-empty title.");
@@ -2403,6 +2409,7 @@ class OverseerImpl implements AgentHooks {
       title,
       created: new Date(),
       bindingName,
+      ...(accessKeyHash ? {accessKeyHash, accessRevision: 1} : {}),
       bindings: {},
     };
     if (output) {
@@ -2565,7 +2572,7 @@ class OverseerImpl implements AgentHooks {
   // ends, so nothing can observe the momentarily head-less record.
   // TODO(multi-gadget): Remove the blueprint-instantiation use once blueprint instantiation is
   // reworked (plan phase 5).
-  ensureDefaultGadget(commitId: string | undefined): WorkpieceId {
+  ensureDefaultGadget(commitId: string | undefined, accessKeyHash?: string): WorkpieceId {
     if (this.defaultGadgetId !== undefined) return this.defaultGadgetId;
     let id = this.allocateWorkpieceId();
     // Set defaultGadgetId first so subscribers computing gadgetRootName() see the legacy names.
@@ -2580,6 +2587,7 @@ class OverseerImpl implements AgentHooks {
       bindingName: "GADGET",
       bindings: {},
       ...(commitId !== undefined ? { commitId } : {}),
+      ...(accessKeyHash ? {accessKeyHash, accessRevision: 1} : {}),
     });
     return id;
   }
@@ -2854,14 +2862,15 @@ class OverseerImpl implements AgentHooks {
 
     // Whether the record is published to this subscriber (see above for what is withheld).
     let published = (record: WorkpieceRecord): boolean =>
-        includePending || (record.type === "gadget" && !record.pending);
+        includePending || (record.type === "gadget" && !record.pending && !record.accessKeyHash);
 
     let dbSubscriber = {
       add(record: WorkpieceRecord) {
         if (published(record)) subscriber.entry(toSummary(record)).catch(unsubscribe);
       },
-      update(_oldRecord: WorkpieceRecord, newRecord: WorkpieceRecord) {
+      update(oldRecord: WorkpieceRecord, newRecord: WorkpieceRecord) {
         if (published(newRecord)) subscriber.entry(toSummary(newRecord)).catch(unsubscribe);
+        else if (published(oldRecord)) subscriber.removed(oldRecord.id).catch(unsubscribe);
       },
       remove(record: WorkpieceRecord) {
         if (published(record)) subscriber.removed(record.id).catch(unsubscribe);
@@ -5089,7 +5098,8 @@ class OverseerImpl implements AgentHooks {
   // is what ctx.restore() invokes, touches the raw facet (see #getGadgetFacetRaw).
   async getGadgetFacetFetcher(gadgetId: WorkpieceId, chatId?: number)
       : Promise<Fetcher<DurableObject>> {
-    let params: OverseerRestoreParams = {type: "gadget", gadgetId};
+    const revision = this.getGadgetRecord(gadgetId).accessRevision;
+    let params: OverseerRestoreParams = {type: "gadget", gadgetId, ...(revision ? {accessRevision: revision} : {})};
     chatId = this.#resolveGadgetChatId(gadgetId, chatId);
     if (chatId !== undefined) params.chatId = chatId;
     return await this.ctx.restore(params);  // validates the gadget exists, in [restore]()
@@ -5606,6 +5616,9 @@ class OverseerImpl implements AgentHooks {
     switch (target.type) {
       case "gadget": {
         if (caller.from === "agent") {
+          if (this.getGadgetRecord(target.id).accessKeyHash && this.storage.chatContext.get(caller.chatId)?.spawnerConfig) {
+            throw new Error("Spawned agents cannot open key-locked gadgets.");
+          }
           this.#getOrCreateCapturedActions(caller.chatId).accessedGadget = true;
         }
         let chatId = "chatId" in caller ? caller.chatId : undefined;
@@ -6286,7 +6299,8 @@ class OverseerImpl implements AgentHooks {
   async syncOutputsTo(user: DurableObjectStub<UserDurableObject>,
                       snapshot = this.outputsSnapshot()): Promise<boolean> {
     try {
-      await user.syncWorkspaceOutputs(this.ctx.id.toString(), snapshot);
+      const visible = user.id?.toString() === this.ownerId ? snapshot : snapshot.filter(entry => !this.getGadgetRecord(entry.workpieceId).accessKeyHash);
+      await user.syncWorkspaceOutputs(this.ctx.id.toString(), visible);
       return true;
     } catch (err) {
       this.logger.warn("failed to sync workspace outputs to user DO", {
@@ -6318,8 +6332,8 @@ class OverseerImpl implements AgentHooks {
     let ownerId = this.ownerId;
     if (!ownerId) return;
 
-    // Built once and shared, rather than once per recipient: the registry is the same for all of
-    // them, and rebuilding it per viewer is what made a push cost outputs times viewers.
+    // Build the presentation snapshot once. syncOutputsTo applies the key-locked visibility
+    // filter before each non-owner index receives it.
     let snapshot = this.outputsSnapshot();
 
     // The registry notifies on every gadget update, but this carries only titles and presentation,
@@ -6327,7 +6341,7 @@ class OverseerImpl implements AgentHooks {
     // would change on. Skipping those is most of the traffic. Safe to compare against what this
     // instance last sent because a newly connected watcher is synced by open() before it joins the
     // fan-out, and a cold DO has nothing recorded and so always pushes.
-    let encoded = JSON.stringify(snapshot);
+    let encoded = JSON.stringify([snapshot, [...this.storage.gadgets.list()].filter(record => record.type === "gadget" && record.accessKeyHash).map(record => record.id)]);
     if (encoded === this.#lastOutputsPushed) return;
 
     let userIds = new Set([ownerId, ...this.#connectedIndexes.keys()]);
@@ -7704,7 +7718,7 @@ class OverseerImpl implements AgentHooks {
     let result: Record<string, WorkpieceId> = Object.create(null);
     // Worktrees never seed chats: they are chat-private and carry no bindingName at all.
     let gadgets = [...this.storage.gadgets.list()]
-        .filter((gadget): gadget is GadgetRecord => gadget.type === "gadget" && !gadget.pending);
+        .filter((gadget): gadget is GadgetRecord => gadget.type === "gadget" && !gadget.pending && !gadget.accessKeyHash);
     for (let gadget of gadgets) {
       if (!(gadget.bindingName in result)) result[gadget.bindingName] = gadget.id;
     }
@@ -9845,12 +9859,15 @@ class OverseerImpl implements AgentHooks {
     // gadgetId; they resolve to the default gadget. If that gadget was deleted (or there is no
     // default), this fails with an explicit error rather than silently retargeting.
     let gadgetId = this.resolveGadgetId(params.gadgetId);
-    this.getGadgetRecord(gadgetId);  // validate it exists
+    const record = this.getGadgetRecord(gadgetId);
+    if ((params.accessRevision ?? 0) !== (record.accessRevision ?? 0)) throw new Error("This gadget capability has been revoked.");
     return this.#getGadgetFacetRaw(gadgetId, this.#resolveGadgetChatId(gadgetId, params.chatId));
   }
 }
 
 type OverseerRestoreParams = {
+  // Sealed by the kernel; legacy descriptors belong to revision zero.
+  accessRevision?: number;
   // This is a stub pointing at the gadget. [restore]() will return the facet stub.
   type: "gadget";
 
@@ -9926,6 +9943,13 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async getOutputsForOwnerBackfill(ownerId: string): Promise<WorkspaceOutputEntry[] | null> {
     if (this.impl.ownerId !== ownerId) return null;
     return this.impl.outputsSnapshot();
+  }
+
+  /** Refresh a shared user's index from current OS visibility; never returns locked gadget metadata. */
+  async getSharedOutputsForIndex(profileId: string): Promise<WorkspaceOutputEntry[]> {
+    const sharing = await this.impl.getSharingManager();
+    if (!sharing.getEffectiveRole(profileId)) return [];
+    return this.impl.outputsSnapshot().filter(entry => !this.impl.getGadgetRecord(entry.workpieceId).accessKeyHash);
   }
 
   /**
@@ -10242,8 +10266,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    * Initialize this workspace's default gadget from a blueprint's code snapshot. Called by
    * AuthenticatedApi.newGadgetFromBlueprint() after creating (and opening) the DO.
    */
-  async initializeFromBlueprint(code: Uint8Array, title: string, output?: BlueprintOutput)
+  async initializeFromBlueprint(code: Uint8Array, title: string, output?: BlueprintOutput, access?: GadgetAccessConfiguration)
       : Promise<void> {
+    const accessKeyHash = await gadgetAccessHash(access);
     // Set the title. The default gadget (created below) inherits it.
     this.impl.storage.title.put(title);
 
@@ -10283,7 +10308,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     // Blueprint instantiation still creates a fresh workspace containing one auto-created gadget,
     // recorded as the default gadget (see ensureDefaultGadget).
-    let gadgetId = this.impl.ensureDefaultGadget(commitId);
+    let gadgetId = this.impl.ensureDefaultGadget(commitId, accessKeyHash);
     this.impl.recordGadgetAnalytics({
       event_name: "workpiece_created",
       user_id: ownerId,
@@ -10450,8 +10475,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // exist are dropped.
     let bindings: Record<string, WorkpieceId> = Object.create(null);
     for (let [name, target] of Object.entries(config.env)) {
-      if (this.impl.storage.gadgets.get(target)?.type === "gadget" ||
-          this.impl.storage.gatekeepers.get(target)) {
+      const gadget = this.impl.storage.gadgets.get(target);
+      if (gadget?.type === "gadget" && gadget.accessKeyHash) throw new Error("Key-locked gadgets cannot be delegated into agent spawner environments.");
+      if (gadget?.type === "gadget" || this.impl.storage.gatekeepers.get(target)) {
         bindings[name] = target;
       }
     }
@@ -10966,8 +10992,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return this.#subscriptionLease(this.impl.subscribeToWorkpieces(subscriber, true));
   }
 
-  async createGadget(title: string, chatId?: number, bindingName?: string)
+  async createGadget(title: string, chatId?: number, bindingName?: string, access?: GadgetAccessConfiguration, blueprintId?: string)
       : Promise<RpcStub<GadgetClient>> {
+    if (access && !this.isOwner) throw new Error("Only the workspace owner can set gadget access.");
+    const accessKeyHash = await gadgetAccessHash(access);
+    if (blueprintId && chatId !== undefined) throw new Error("Blueprint instance creation here must be permanent.");
+    const blueprint = blueprintId ? await this.impl.fetchBlueprint(blueprintId) : undefined;
     // When creating within a chat, names already claimed in that chat's scope (its frozen seed
     // plus log-derived bindings) are off-limits too: the chat's binding map is keyed by name,
     // so on replay the existing binding would win and the new gadget would never be addressable
@@ -11005,14 +11035,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       // GadgetRecord.commitId), giving a chat's first edit a commit to pin. Written before the
       // record -- it is content-addressed and referenced by nothing yet, so a validation
       // failure in createGadget below leaves no trace worth cleaning up.
-      let initialCommitId = await this.impl.gitStore.writeFilesAsCommit(new Map(), {
+      let initialCommitId = await this.impl.gitStore.writeFilesAsCommit(new Map(Object.entries(blueprint?.files ?? {})), {
         parents: [],
         author: commitIdentityForAuthor(await this.#getClientProfile()),
         message: `Create gadget: ${title}`,
         timestamp: new Date(),
       });
       // (createGadget validates the title and name.)
-      record = this.impl.createGadget(title, bindingName, undefined, undefined, initialCommitId);
+      record = this.impl.createGadget(title, bindingName, undefined, blueprint?.output, initialCommitId, undefined, accessKeyHash);
       this.impl.recordGadgetAnalytics({
         event_name: "workpiece_created",
         user_id: this.clientUserId,
@@ -11032,7 +11062,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         throw new Error(`No such chat: ${chatId}`);
       }
       record = this.impl.createGadget(title, bindingName, chatId, undefined, undefined,
-                                     this.clientUserId);
+                                     this.clientUserId, accessKeyHash);
       this.impl.addChatMessages(chatId, author, [{
         type: "changes",
         createdGadgets: [{gadgetId: record.id, title: record.title, bindingName}],
@@ -11205,6 +11235,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       }
       let gadget = this.impl.storage.gadgets.get(target);
       if (gadget) {
+        if (gadget.type === "gadget" && gadget.accessKeyHash) throw new Error("Key-locked gadgets cannot be delegated into agent spawner environments.");
         if (gadget.type === "worktree") {
           throw new Error(`Agent spawner env entry "${name}" references workpiece ${target}, ` +
               `which is a worktree; worktrees are chat-private and cannot be configured.`);
@@ -12402,7 +12433,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       title: this.impl.storage.title.get(),
       owner: await retryOnDoReset(() => this.#owner.whoami(), this.impl.logger),
       role: "use",
-      defaultGadgetId: this.impl.defaultGadgetId,
+      defaultGadgetId: this.impl.defaultGadgetId !== undefined && !this.impl.getGadgetRecord(this.impl.defaultGadgetId).accessKeyHash ? this.impl.defaultGadgetId : undefined,
     };
   }
 
@@ -12419,7 +12450,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       title: this.impl.storage.title.get(),
       owner,
       role: "use",
-      defaultGadgetId: this.impl.defaultGadgetId,
+      defaultGadgetId: this.impl.defaultGadgetId !== undefined && !this.impl.getGadgetRecord(this.impl.defaultGadgetId).accessKeyHash ? this.impl.defaultGadgetId : undefined,
     };
 
     let titleSubscriber = {
@@ -12451,8 +12482,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     return this.#subscriptionLease(this.impl.addPresenceSubscriber(subscriber));
   }
 
-  // The gadget list is visible to "use" collaborators (v1 shares the whole workspace), and each
-  // gadget is exposed through a restricted UseGadgetClientInterface that only permits rendering
+  // Workspace-shared gadgets are visible to "use" collaborators; key-locked gadgets are
+  // admitted separately by getGadget(id, key). Each admitted gadget is exposed through a
+  // restricted UseGadgetClientInterface that only permits rendering
   // its deployed UI. Gadgets still provisional to a chat are withheld: they are proposals within
   // the owner's chats, and their mainline code is empty anyway. Worktrees are withheld likewise,
   // being chat-private (and readable only through the build-only commit reads).
@@ -12460,13 +12492,16 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     return this.#subscriptionLease(this.impl.subscribeToWorkpieces(subscriber, false));
   }
 
-  async getGadget(id: WorkpieceId): Promise<RpcStub<GadgetClient>> {
+  async getGadget(id: WorkpieceId, key?: string): Promise<RpcStub<GadgetClient>> {
+    const record = this.impl.getGadgetRecord(id);
+    const admittedHash = key === undefined ? undefined : await gadgetAccessHash({visibility:"key",key});
+    assertGadgetAccess(record.accessKeyHash, admittedHash);
     if (this.impl.getGadgetRecord(id).pending) {  // also validates it exists
       throw new Error(`No such gadget: ${id}`);
     }
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
-    return new UseGadgetClientInterface(this.impl, id, this.clientUserId);
+    return new UseGadgetClientInterface(this.impl, id, this.clientUserId, admittedHash);
   }
 
   // --- Denied methods (build-only) ---
@@ -12636,6 +12671,28 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     return wrapDoStubForTelemetry(
         this.impl.users.get(this.impl.users.idFromString(this.clientUserId)),
         this.impl.logger);
+  }
+
+  async getAccessMode(): Promise<'workspace' | 'key'> {
+    return this.impl.getGadgetRecord(this.id).accessKeyHash ? 'key' : 'workspace';
+  }
+
+  async setAccess(configuration: GadgetAccessConfiguration): Promise<void> {
+    if (this.clientUserId !== this.impl.ownerId) throw new Error("Only the workspace owner can set gadget access.");
+    const accessKeyHash = await gadgetAccessHash(configuration);
+    const record = this.impl.getGadgetRecord(this.id);
+    if (record.accessKeyHash === accessKeyHash) return;
+    if (accessKeyHash) {
+      for (const connection of this.impl.storage.gatekeepers.list()) {
+        if (connection.creationSpec?.type === 'agentSpawner' && Object.values(connection.creationSpec.config.env).includes(this.id)) {
+          throw new Error('Remove this gadget from agent spawner environments before locking it.');
+        }
+      }
+    }
+    record.accessKeyHash = accessKeyHash;
+    record.accessRevision = (record.accessRevision ?? 0) + 1;
+    this.impl.storage.gadgets.put(record);
+    this.impl.bumpVersion([this.id]);
   }
 
   async getId(): Promise<WorkpieceId> {
@@ -12891,7 +12948,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
   #leaveSession: () => void;
 
   constructor(private impl: OverseerImpl, private id: WorkpieceId,
-      private clientUserId: string) {
+      private clientUserId: string, private admittedHash?: string) {
     super();
     this.#leaveSession = impl.joinSession("use");
   }
@@ -12911,21 +12968,26 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     throw new Error("Unauthorized: this collaborator only has permission to use the gadget's UI.");
   }
 
+  #authorize(): void { assertGadgetAccess(this.impl.getGadgetRecord(this.id).accessKeyHash, this.admittedHash); }
+
+  async getAccessMode(): Promise<'workspace' | 'key'> { this.#authorize(); return this.impl.getGadgetRecord(this.id).accessKeyHash ? 'key' : 'workspace'; }
+  async setAccess(_configuration: GadgetAccessConfiguration): Promise<void> { this.#deny(); }
+
   // --- Allowed methods ---
 
   async getId(): Promise<WorkpieceId> {
-    return this.id;
+    this.#authorize(); return this.id;
   }
 
   async getTitle(): Promise<string> {
-    return this.impl.getGadgetRecord(this.id).title;
+    this.#authorize(); return this.impl.getGadgetRecord(this.id).title;
   }
 
   async getUiBundle(chatId?: number): Promise<UiBundle | null> {
     if (chatId !== undefined) {
       this.#deny();
     }
-    return this.impl.getGadgetUiBundle(this.id);
+    this.#authorize(); const result = await this.impl.getGadgetUiBundle(this.id); this.#authorize(); return result;
   }
 
   async connectToGadget(chatId?: number): Promise<RpcStub<any>> {
@@ -12933,6 +12995,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
       this.#deny();
     }
 
+    this.#authorize();
     this.impl.recordGadgetAnalytics({
       event_name: "gadget_interaction",
       user_id: this.#clientUser.id.toString(),
@@ -12940,17 +13003,26 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     });
     // The facet stub counts as a "use" session for its own lifetime, like this interface: it can
     // outlive this object, and it is the very stub a hook-enable widening's data flows through.
-    return this.impl.getGadgetFacet(this.id, undefined, "use");
+    const result = await this.impl.getGadgetFacet(this.id, undefined, "use");
+    try { this.#authorize(); return result; } catch (error) { result[Symbol.dispose](); throw error; }
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
     if (chatId !== undefined) this.#deny();
-    return this.impl.getGadgetExportFormats(this.id);
+    this.#authorize(); const result = await this.impl.getGadgetExportFormats(this.id); this.#authorize(); return result;
   }
 
   async export(id: string, chatId?: number): Promise<ReadableStream<Uint8Array>> {
     if (chatId !== undefined) this.#deny();
-    return this.impl.exportGadget(this.id, id);
+    this.#authorize();
+    const revision = this.impl.getGadgetRecord(this.id).accessRevision ?? 0;
+    const result = await this.impl.exportGadget(this.id, id);
+    const authorize = () => {
+      this.#authorize();
+      if ((this.impl.getGadgetRecord(this.id).accessRevision ?? 0) !== revision) throw new Error('This gadget export has been revoked.');
+    };
+    try { authorize(); } catch (error) { await result.cancel(error).catch(() => {}); throw error; }
+    return guardGadgetExport(result, authorize);
   }
 
   // --- Denied methods (build-only) ---
