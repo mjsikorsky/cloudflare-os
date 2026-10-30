@@ -1965,6 +1965,7 @@ export default function GadgetEditor() {
                   onConsoleLog={handleClientConsoleLog}
                   onIframeEscape={isGadgetFullscreen ? exitGadgetFullscreen : undefined}
                   onNoUiChange={handleNoUiChange}
+                  onOpenConnections={() => { if(isGadgetFullscreen)exitGadgetFullscreen();openMobilePane('connections') }}
                 />
               ) : !previewMode && (
                 <NoGadgetPlaceholder height="100%" />
