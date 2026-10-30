@@ -1648,6 +1648,7 @@ class OverseerImpl implements AgentHooks {
 
   // True while alarm() runs (see runAlarmTasks); #updateAlarm defers to its end.
   #inAlarmHandler = false;
+  #continuationWake: (() => void) | undefined;
 
   // Drains of pending agent calls currently in flight, by chat (see drainPendingAgentCalls).
   #pendingCallDrains = new Map<number, Promise<void>>();
@@ -1893,12 +1894,34 @@ class OverseerImpl implements AgentHooks {
     this.#inAlarmHandler = true;
     try {
       do {
-        let results = await Promise.allSettled([
+        let settled = false;
+        const concerns = Promise.allSettled([
           this.waitForAllAgentsToComplete(),
           this.drainAllPendingAgentCalls(),
           this.deliverReadyExternalMessageResponses(),
-          this.runGatekeeperContinuations(),
-        ]);
+        ]).finally(() => { settled = true; });
+        // A long agent turn holds this physical alarm open. Pump retained facet
+        // deadlines alongside it instead of starving them until the turn ends.
+        do {
+          await this.runGatekeeperContinuations();
+          if (settled) break;
+          const deadlines = [...this.storage.gatekeeperContinuations.list()].map(row => row.at);
+          const delay = Math.max(1000, Math.min(30000, ...deadlines.map(at => at - Date.now())));
+          let wake: (() => void) | undefined;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const next = new Promise<void>(resolve => {
+              wake = resolve;
+              this.#continuationWake = resolve;
+              timer = setTimeout(resolve, delay);
+            });
+            await Promise.race([concerns, next]);
+          } finally {
+            if (timer !== undefined) clearTimeout(timer);
+            if (this.#continuationWake === wake) this.#continuationWake = undefined;
+          }
+        } while (!settled);
+        const results = await concerns;
         for (let result of results) {
           if (result.status === "rejected") throw result.reason;
         }
@@ -5646,6 +5669,7 @@ class OverseerImpl implements AgentHooks {
       }
       this.storage.gatekeeperContinuations.put({id, at: Math.max(Date.now() + 1000, timestamp)});
     }
+    this.#continuationWake?.();
     this.#updateAlarm();
   }
 
