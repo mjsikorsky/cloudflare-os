@@ -8,7 +8,7 @@ import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, Work
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, type GatekeeperContext, type GatekeeperAlarmScheduler, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -1245,6 +1245,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         }
       }),
 
+      gatekeeperContinuations: collection<{id: number; at: number; claim?: string}>()({
+        primaryKey: "id",
+      }),
+
       gatekeepers: collection<GatekeeperRecord>()({
         primaryKey: "id",
 
@@ -1843,7 +1847,7 @@ class OverseerImpl implements AgentHooks {
   #updateAlarm(): void {
     if (this.#inAlarmHandler) return;
 
-    let times: number[] = [];
+    let times: number[] = [...this.storage.gatekeeperContinuations.list()].map(row => row.at);
 
     // Outstanding agent work: see #agentKeepAliveTime for why it is set once and held.
     let hasAgentWork = this.#runningAgents.size > 0 ||
@@ -1893,6 +1897,7 @@ class OverseerImpl implements AgentHooks {
           this.waitForAllAgentsToComplete(),
           this.drainAllPendingAgentCalls(),
           this.deliverReadyExternalMessageResponses(),
+          this.runGatekeeperContinuations(),
         ]);
         for (let result of results) {
           if (result.status === "rejected") throw result.reason;
@@ -5417,7 +5422,8 @@ class OverseerImpl implements AgentHooks {
     // happen long after the session that queued it, so the queue-time stub is gone) -- the
     // binding that makes buildPack() serve exactly this action's pending-push closure.
     await gatekeeper.applyAction(record.action,
-        new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id));
+        new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id),
+        this.gatekeeperContext(record.gatekeeperId));
     record.state = "approved";
     record.appliedAt = new Date();
     record.resolvedBy = resolvedBy;
@@ -5611,6 +5617,64 @@ class OverseerImpl implements AgentHooks {
 
     this.ctx.facets.delete(`gatekeeper${id}`);
     this.storage.gatekeepers.delete(id);
+    this.storage.gatekeeperContinuations.delete(id);
+    this.#updateAlarm();
+  }
+
+  gatekeeperContext(id: number): GatekeeperContext {
+    if (!this.storage.gatekeepers.get(id)) throw new Error("No such gatekeeper.");
+    return {alarms: this.ctx.exports.GatekeeperAlarmLoopback({props: {
+      overseerId: this.ctx.id.toString(), gatekeeperId: id,
+    }})};
+  }
+
+  gatekeeperAlarm(id: number): number | null {
+    this.assertGatekeeperUsable(id);
+    if (!this.storage.gatekeepers.get(id)) throw new Error("No such gatekeeper.");
+    const deadline = this.storage.gatekeeperContinuations.get(id);
+    // The recovery claim is not a requested continuation: callers must explicitly
+    // re-arm their next deadline before a successful delivery clears the claim.
+    return deadline && !deadline.claim ? deadline.at : null;
+  }
+
+  setGatekeeperAlarm(id: number, timestamp: number | null): void {
+    this.gatekeeperAlarm(id);
+    if (timestamp === null) this.storage.gatekeeperContinuations.delete(id);
+    else {
+      if (!Number.isSafeInteger(timestamp) || timestamp < 0 || timestamp > Date.now() + 366 * 86400000) {
+        throw new TypeError("Invalid gatekeeper continuation deadline.");
+      }
+      this.storage.gatekeeperContinuations.put({id, at: Math.max(Date.now() + 1000, timestamp)});
+    }
+    this.#updateAlarm();
+  }
+
+  async runGatekeeperContinuations(): Promise<void> {
+    const due = [...this.storage.gatekeeperContinuations.list()]
+      .filter(row => row.at <= Date.now()).sort((a, b) => a.at - b.at || a.id - b.id).slice(0, 4);
+    for (const row of due) {
+      if (!this.storage.gatekeepers.get(row.id)) {
+        this.storage.gatekeeperContinuations.delete(row.id);
+        continue;
+      }
+      // Replace the consumed deadline with recovery before crossing a facet await.
+      // A root eviction must not strand previously approved durable work.
+      const claim = crypto.randomUUID();
+      this.storage.gatekeeperContinuations.put({id: row.id, at: Date.now() + 300000, claim});
+      try {
+        this.assertGatekeeperUsable(row.id);
+        const facet = this.getGatekeeperFacet(row.id) as
+          Fetcher<Gatekeeper<any> & Required<Pick<Gatekeeper<any>, "continueProcessing">>>;
+        await facet.continueProcessing(this.gatekeeperContext(row.id));
+        if (this.storage.gatekeeperContinuations.get(row.id)?.claim === claim) {
+          this.storage.gatekeeperContinuations.delete(row.id);
+        }
+      } catch {
+        if (this.storage.gatekeepers.get(row.id) && !this.storage.gatekeeperContinuations.get(row.id)) {
+          this.storage.gatekeeperContinuations.put({id: row.id, at: Date.now() + 300000});
+        }
+      }
+    }
   }
 
   // Open the session behind a binding loopback.
@@ -6453,7 +6517,7 @@ class OverseerImpl implements AgentHooks {
       : Promise<RpcStub<Session>> {
     this.assertGatekeeperUsable(id);
     // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
-    return facet.startSession(new ApprovalQueueImpl(this, id, caller));
+    return facet.startSession(new ApprovalQueueImpl(this, id, caller), this.gatekeeperContext(id));
   }
 
   // Sessions are authorized and verified only at open(), so widening what a live session's holder
@@ -9926,6 +9990,14 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     await this.impl.runAlarmTasks();
   }
 
+  /** Read the deadline sealed into a gatekeeper's kernel alarm capability. */
+  getGatekeeperContinuationAlarm(id: number): number | null { return this.impl.gatekeeperAlarm(id); }
+
+  /** Update only the deadline sealed into a gatekeeper's kernel alarm capability. */
+  setGatekeeperContinuationAlarm(id: number, timestamp: number | null): void {
+    this.impl.setGatekeeperAlarm(id, timestamp);
+  }
+
   // Initialize a brand-new workspace's storage. (Before git-backed code storage this also wrote
   // an empty Yjs snapshot as legacy code version 1; workspaces born since have no legacy code
   // log at all -- committed code exists only once a first commit lands in the git store.)
@@ -10579,6 +10651,25 @@ export class GatekeeperLoopback extends WorkerEntrypoint<Cloudflare.Env, Gatekee
    * and so the loopback binding won't be created.
    */
   dummyMethodToWorkAroundValidatorBug() {}
+}
+
+/** Persistent, single-facet alarm capability; it cannot dispatch arbitrary methods. */
+export class GatekeeperAlarmLoopback
+    extends WorkerEntrypoint<Cloudflare.Env, {overseerId: string; gatekeeperId: number}>
+    implements GatekeeperAlarmScheduler {
+  #overseer() {
+    const ns = this.ctx.exports.OverseerDurableObject;
+    return ns.get(ns.idFromString(this.ctx.props.overseerId));
+  }
+  getAlarm(): Promise<number | null> {
+    return this.#overseer().getGatekeeperContinuationAlarm(this.ctx.props.gatekeeperId);
+  }
+  setAlarm(timestamp: number): Promise<void> {
+    return this.#overseer().setGatekeeperContinuationAlarm(this.ctx.props.gatekeeperId, timestamp);
+  }
+  deleteAlarm(): Promise<void> {
+    return this.#overseer().setGatekeeperContinuationAlarm(this.ctx.props.gatekeeperId, null);
+  }
 }
 
 type GatekeeperHookLoopbackProps = {
