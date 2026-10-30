@@ -2000,6 +2000,7 @@ export default function GadgetEditor() {
                   isAgentActive={isAgentActive}
                   isVisible={activeTab === 'code'}
                   onHasCodeChange={setHasCode}
+                  onReviewChat={navigateToChat}
                 />
               ) : (
                 <NoGadgetPlaceholder height="100%" />
