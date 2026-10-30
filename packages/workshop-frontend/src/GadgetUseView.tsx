@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react'
+import GadgetKeyUnlock, { type UnlockedGadget } from './features/gadgets/GadgetKeyUnlock'
 import { Link } from '@tanstack/react-router'
 import { Hexagon } from '@phosphor-icons/react'
 import { FormatGlyph } from './components/format/FormatVisuals'
@@ -55,6 +57,11 @@ export default function GadgetUseView({
   authenticatedApi,
   currentUserId,
 }: Props) {
+  const [unlocked, setUnlocked] = useState<UnlockedGadget | null>(null)
+  useEffect(() => () => { unlocked?.stub[Symbol.dispose]() }, [unlocked])
+  useEffect(() => { setUnlocked(null) }, [overseer])
+  const activeGadget = unlocked?.stub ?? gadget
+  const activeId = unlocked?.id ?? selectedGadgetId
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-kumo-base">
       {/* ═══ TOP BAR ════════════════════════════════════════════════════════════ */}
@@ -91,7 +98,7 @@ export default function GadgetUseView({
               <button
                 key={g.id}
                 type="button"
-                onClick={() => onSelectGadget(g.id)}
+                onClick={() => { setUnlocked(null); onSelectGadget(g.id) }}
                 aria-current={g.id === selectedGadgetId ? 'true' : undefined}
                 className={`flex-shrink-0 cursor-pointer rounded-full px-3 py-1 text-[12px] leading-4 tracking-[-0.2px] transition-colors duration-150 ease-out ${
                   g.id === selectedGadgetId
@@ -110,9 +117,10 @@ export default function GadgetUseView({
 
         {/* Right: presence and user menu */}
         <div className="flex items-center gap-2 flex-shrink-0">
+          <GadgetKeyUnlock overseer={overseer} onUnlocked={setUnlocked} />
           <GadgetExportMenu
-            gadget={gadget}
-            gadgetTitle={gadgets.find(g => g.id === selectedGadgetId)?.title ?? 'Gadget'}
+            gadget={activeGadget}
+            gadgetTitle={unlocked?.title ?? gadgets.find(g => g.id === selectedGadgetId)?.title ?? 'Gadget'}
           />
           <span className="hidden md:inline-flex">
             <GadgetPresence
@@ -131,7 +139,7 @@ export default function GadgetUseView({
             <button
               key={g.id}
               type="button"
-              onClick={() => onSelectGadget(g.id)}
+              onClick={() => { setUnlocked(null); onSelectGadget(g.id) }}
               aria-current={g.id === selectedGadgetId ? 'true' : undefined}
               className={`h-9 max-w-[180px] shrink-0 truncate rounded-lg px-3 text-[14px] font-medium ${
                 g.id === selectedGadgetId
@@ -147,10 +155,11 @@ export default function GadgetUseView({
 
       {/* ═══ GADGET UI ══════════════════════════════════════════════════════════ */}
       <div className="flex-1 min-h-0 overflow-hidden">
-        {gadget ? (
+        {activeGadget ? (
           <GadgetUI
-            key={selectedGadgetId}
-            gadget={gadget}
+            key={activeId}
+            gadget={activeGadget}
+            deviceStateScope={currentUserId && activeId !== null ? {userId: currentUserId, gadgetId: activeId} : undefined}
             height="100%"
             isVisible={true}
           />
