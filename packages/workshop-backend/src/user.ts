@@ -1310,8 +1310,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           let enabledResources =
               filterEnabledResources(config, id, supportedResources);
           if (enabledResources.length == 0) {
-            // Every resource for this vendor is disabled (or it advertised none) — hide the vendor.
-            return null;
+            // Ambient singletons have no URL resources. Keep them discoverable so an already
+            // connected account can be selected explicitly in the native connection picker.
+            // A vendor whose advertised resources were disabled must remain hidden.
+            let ambientSingleton = description.autoProvisionsAccount &&
+                supportedResources.length === 0 &&
+                ambientGatekeeperMode(config, id) !== "disabled";
+            if (!ambientSingleton) return null;
           }
 
           return {id, description, supportedResources: enabledResources};
