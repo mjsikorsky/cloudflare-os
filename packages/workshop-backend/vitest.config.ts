@@ -84,6 +84,7 @@ export default defineConfig({
           compatibilityFlags: ['experimental', 'streaming_tail_worker'],
         }],
         bindings: { PUBLIC_BASE_URL: 'https://workshop.example/' },
+        kvNamespaces: ['BLUEPRINTS'],
         // The overseer loads gadget code through this, so a test can run a real gadget facet.
         workerLoaders: { LOADER: {} },
         durableObjects: {

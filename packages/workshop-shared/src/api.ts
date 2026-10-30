@@ -778,11 +778,13 @@ export interface AuthenticatedApi extends RpcTarget {
    * Every required binding in the blueprint must have a corresponding entry in `bindings`,
    * keyed by binding name. Throws if any are missing or if accountId/modelId are invalid.
    *
+   * `access` atomically sets this gadget’s admission policy; omitted preserves workspace sharing.
    * The returned Overseer can be used immediately (pipelining-friendly).
    */
   newGadgetFromBlueprint(
     blueprintId: string,
-    bindings: Record<string, BlueprintBindingAssignment>
+    bindings: Record<string, BlueprintBindingAssignment>,
+    access?: GadgetAccessConfiguration
   ): Promise<RpcStub<Overseer>>;
 
   /**
@@ -1964,6 +1966,8 @@ export interface Overseer extends RpcTarget {
   subscribeToWorkpieces(subscriber: RpcStub<WorkpiecesSubscriber>): Promise<RpcStub<{}>>;
 
   /**
+   * `blueprintId` copies a reusable blueprint into a permanent gadget in this same workspace.
+   * `access` is owner-only and applies atomically at creation; omitted preserves existing shared behavior.
    * Create a new gadget workpiece in this workspace. `title` is required -- gadgets have no
    * default title. The new gadget starts with no files and no bindings.
    *
@@ -1972,7 +1976,9 @@ export interface Overseer extends RpcTarget {
    * `createdGadgets`), and the gadget remains pending (see WorkpieceSummary.chatId) until
    * the user accepts the chat's changes through that message (merging deletes the pending marker;
    * reverting deletes the gadget). Without `chatId` the gadget is created permanently, with an
-   * empty initial commit as its head (see WorkpieceSummary.commitId).
+   * empty initial commit as its head (see WorkpieceSummary.commitId). With `blueprintId`, a
+   * permanent instance instead starts from that reusable blueprint's files and output type;
+   * required external bindings must then be explicitly configured by an editor.
    *
    * `bindingName` is the name under which the gadget appears in chat envs and the workspace
    * default binding list (see validateBindingName()). When absent, the server chooses one from
@@ -1981,14 +1987,15 @@ export interface Overseer extends RpcTarget {
    * gadget -- including one still pending in another chat (retry after that chat's changes are
    * accepted or reverted).
    */
-  createGadget(title: string, chatId?: number, bindingName?: string)
+  createGadget(title: string, chatId?: number, bindingName?: string, access?: GadgetAccessConfiguration, blueprintId?: string)
       : Promise<RpcStub<GadgetClient>>;
 
   /**
+   * Key-locked gadgets require their current key for use-role callers; owner/build editors remain trusted.
    * Get the gadget with the given workpiece ID. To allow for pipelining, this throws an
    * exception if there is no such gadget.
    */
-  getGadget(id: WorkpieceId): Promise<RpcStub<GadgetClient>>;
+  getGadget(id: WorkpieceId, key?: string): Promise<RpcStub<GadgetClient>>;
 
   /**
    * Read a commit's whole tree as nested TreeNodes: the root directory's entries, each
@@ -4443,12 +4450,23 @@ export type GadgetExportFormat = {
   fileExtension: string;
 };
 
+/** OS admission policy for ordinary workspace users. Build editors remain trusted with workspace code. */
+export type GadgetAccessConfiguration =
+  | { /** Preserve workspace-wide UI access. */ visibility: 'workspace' }
+  | { /** Admit only holders of this gadget's capability. */ visibility: 'key'; /** Client-generated 32 random bytes, base64url encoded without padding; never gadget configuration. */ key: string };
+
 /**
  * Capability representing one gadget workpiece within a workspace. Obtained from
  * Overseer.createGadget() or Overseer.getGadget(). Workspace-level concerns (code sync, chats,
  * sharing, actions, blueprint listing) stay on Overseer; this covers the per-gadget surface.
  */
 export interface GadgetClient extends WorkpieceClient {
+  /** Current OS admission mode; this never returns the key or its digest. */
+  getAccessMode(): Promise<'workspace' | 'key'>;
+
+  /** Owner-only explicit sharing/locking/rotation. Revokes the gadget's existing runtime capabilities. */
+  setAccess(configuration: GadgetAccessConfiguration): Promise<void>;
+
   /**
    * Get the gadget's deployed UI code, to be run inside an iframe sandbox.
    *
