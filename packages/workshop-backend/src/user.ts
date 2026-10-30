@@ -1547,6 +1547,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return (record.account as unknown as SingletonAccountStub).getSingletonGatekeeperClass();
   }
 
+  /** Owner-selected ambient account only; this never turns URL resources into singleton grants. */
+  async getAmbientSingletonGatekeeperClass(accountId:number){
+    const record=this.storage.connectedAccounts.get(accountId);
+    if(!record?.autoProvisioned||!record.description.singleton)throw Error('Select a connected ambient account.');
+    const config=await readAdminConfig(this.env);
+    if(ambientGatekeeperMode(config,record.vendorId)==='disabled')throw Error('This account service is disabled.');
+    const resources=await record.account.getSupportedResources();
+    if(!Array.isArray(resources)||resources.length!==0)throw Error('This account requires an explicit resource selection.');
+    return{class:await (record.account as unknown as SingletonAccountStub).getSingletonGatekeeperClass(),vendorId:record.vendorId};
+  }
+
   /**
    * Open the full-page management UI for an account that declares one. `context.isAdmin` is supplied
    * fresh by the caller so admin-gated features reflect the user's current status.

@@ -76,6 +76,7 @@ type ConnectionTypeId =
   | 'ai-model'
   | 'agent-spawner'
   | `resource:${string}:${string}`
+  | `ambient:${string}`
 
 type ConnectionType = {
   id: ConnectionTypeId
@@ -101,6 +102,7 @@ type ConnectionType = {
   // Pin the glyph to a dark color that reads on the light tile in both themes.
   iconColor?: string
   resourceUrlPattern?: string
+  ambientSingleton?:boolean
   // Whether this resource type is independently grantable.
   grantable?: boolean
 }
@@ -174,6 +176,7 @@ function requiredResourceUrlPatterns(connection: ConnectionType): string[] {
 
 function accountSupportsConnection(account: AccountOption, connection: ConnectionType): boolean {
   return account.vendorId === connection.vendorId &&
+    (!connection.ambientSingleton||Boolean(account.vendorDescription.autoProvisionsAccount&&account.description.singleton&&account.supportedResources.length===0))&&
     (!connection.resourceUrlPattern ||
       connection.resourceUrlPattern === 'https://*' ||
       account.supportedResources.some(resource => resource.urlPattern === connection.resourceUrlPattern))
@@ -246,11 +249,13 @@ export default function GatekeeperModal({
   }, [])
 
   const siteName = useSiteName()
-  const allConnections = useMemo(() => [
+  const allConnections = useMemo<ConnectionType[]>(() => [
     ...platformConnectionTypes(siteName),
     ...vendors.flatMap(vendor => vendor.supportedResources
       .map(resource => connectionForResource(vendor, resource))),
-  ], [siteName, vendors])
+    ...vendors.filter(vendor=>vendor.description.autoProvisionsAccount&&vendor.supportedResources.length===0&&accounts.some(account=>account.vendorId===vendor.id&&account.description.singleton&&account.supportedResources.length===0))
+      .map(vendor=>({id:`ambient:${vendor.id}` as const,vendorId:vendor.id,groupKey:vendor.id,groupLabel:vendor.description.displayName,title:vendor.description.displayName,vendor:vendor.description.displayName,description:vendor.description.description??vendor.description.tagline??'Connect this account to the gadget.',ambientSingleton:true})),
+  ], [siteName, vendors,accounts])
 
   const selectedConnection = useMemo(
     () => allConnections.find(connection => connection.id === selectedConnectionId) ?? null,
@@ -525,6 +530,7 @@ export default function GatekeeperModal({
     const currentIsValid = selectedAccountId !== null
       && matchingAccounts.some(account => account.id === selectedAccountId && account.credentialsValid)
     if (currentIsValid) return
+    if(selectedConnection.ambientSingleton){setSelectedAccountId(null);return;}
     const firstValidAccount = matchingAccounts.find(account => account.credentialsValid)
     setSelectedAccountId(firstValidAccount?.id ?? null)
   }, [selectedConnection, matchingAccounts, selectedAccountId])
@@ -579,6 +585,7 @@ export default function GatekeeperModal({
   const handleSelectConnection = (connection: ConnectionType) => {
     setSelectedConnectionId(connection.id)
     if (!connection.vendorId) return
+    if(connection.ambientSingleton){setSelectedAccountId(null);return;}
     const firstValidAccount = accounts.find(account => account.credentialsValid && accountSupportsConnection(account, connection))
     if (firstValidAccount) setSelectedAccountId(firstValidAccount.id)
     else setSelectedAccountId(null)
@@ -714,17 +721,17 @@ export default function GatekeeperModal({
     if (creating) return
     if (!selectedConnection || selectedAccountId === null) return
     const resourceUrlPattern = selectedConnection.resourceUrlPattern
-    if (!resourceUrlPattern) return
+    if (!resourceUrlPattern&&!selectedConnection.ambientSingleton) return
 
     setCreating(true)
     let gatekeeper: RpcStub<GatekeeperClient<any>> | null = null
     let transferred = false
     try {
-      if (!configuratorFrameState?.frame || configuratorFrameState.accountId !== selectedAccountId || configuratorFrameState.resourceUrlPattern !== resourceUrlPattern) {
+      if (!selectedConnection.ambientSingleton&&(!configuratorFrameState?.frame || configuratorFrameState.accountId !== selectedAccountId || configuratorFrameState.resourceUrlPattern !== resourceUrlPattern)) {
         throw new Error('Configurator is not ready.')
       }
-      const resourceUrl = await configuratorCollectResourceUrlRef.current?.()
-      if (!resourceUrl) throw new Error('Configurator did not provide a resource URL.')
+      const resourceUrl = selectedConnection.ambientSingleton?undefined:await configuratorCollectResourceUrlRef.current?.()
+      if (!selectedConnection.ambientSingleton&&!resourceUrl) throw new Error('Configurator did not provide a resource URL.')
       const overseer = await getOverseer()
       gatekeeper = await overseer.newGatekeeper(selectedAccountId, resourceUrl)
       if (gatekeeper) {
@@ -749,6 +756,7 @@ export default function GatekeeperModal({
     if (selectedConnection.id === 'agent-spawner') {
       return Boolean(spawnerDisplayName.trim()) && !spawnerEnvError
     }
+    if(selectedConnection.ambientSingleton)return selectedAccountId!==null&&Boolean(selectedAccount?.credentialsValid);
     if (selectedConnection.resourceUrlPattern) {
       const resourceUrlPattern = selectedConnection.resourceUrlPattern
       return Boolean(
@@ -770,12 +778,12 @@ export default function GatekeeperModal({
       handleCreateAiModel()
     } else if (selectedConnection.id === 'agent-spawner') {
       handleCreateAgentSpawner()
-    } else if (selectedConnection.resourceUrlPattern) {
+    } else if (selectedConnection.resourceUrlPattern||selectedConnection.ambientSingleton) {
       handleCreateResourceConnection()
     }
   }
 
-  const createLabel = selectedConnection?.resourceUrlPattern
+  const createLabel = selectedConnection?.resourceUrlPattern||selectedConnection?.ambientSingleton
     ? 'Add connection'
     : 'Create connection'
 

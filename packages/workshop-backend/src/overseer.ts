@@ -11189,8 +11189,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     });
   }
 
-  async newGatekeeper(accountId: number, resourceUrl: string)
+  async newGatekeeper(accountId: number, resourceUrl?: string)
       : Promise<GatekeeperClient<any> | null> {
+    if(resourceUrl===undefined){
+      if(this.clientUserId!==this.impl.ownerId)throw Error('Only the workspace owner can add an ambient account connection.');
+      const {class:cls,vendorId}=await this.#clientUser.getAmbientSingletonGatekeeperClass(accountId);
+      const existing=[...this.impl.storage.gatekeepers.list()].find(record=>record.creationSpec?.type==='ambient'&&record.creationSpec.accountId===accountId&&record.creationSpec.vendorId===vendorId);
+      if(existing)return this.getGatekeeperById(existing.id);
+      return this.impl.addGatekeeper(cls,{type:'ambient',vendorId,accountId},this.clientUserId,this.#mintedCapabilityKind());
+    }
     let {class: cls, vendorId, typeUrlPattern} =
         await this.#clientUser.getGatekeeperClassFor(accountId, resourceUrl);
     let creationSpec: GatekeeperCreationSpec = {
@@ -12537,7 +12544,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async listPreApprovableActions(): Promise<PreApprovableAction[]> { this.#deny(); }
   async getGatekeeperById(_id: number): Promise<GatekeeperClient<any>> { this.#deny(); }
-  async newGatekeeper(_accountId: number, _resourceUrl: string)
+  async newGatekeeper(_accountId: number, _resourceUrl?: string)
       : Promise<GatekeeperClient<any> | null> { this.#deny(); }
   async newAiModelGatekeeper(_modelId: string): Promise<GatekeeperClient<any>> { this.#deny(); }
   async newAgentSpawnerGatekeeper(_config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
