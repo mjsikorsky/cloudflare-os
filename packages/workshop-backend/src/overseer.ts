@@ -5677,6 +5677,9 @@ class OverseerImpl implements AgentHooks {
     const due = [...this.storage.gatekeeperContinuations.list()]
       .filter(row => row.at <= Date.now()).sort((a, b) => a.at - b.at || a.id - b.id).slice(0, 4);
     for (const row of due) {
+      // A prior facet await can let another caller cancel or postpone this wake.
+      const current = this.storage.gatekeeperContinuations.get(row.id);
+      if (!current || current.at !== row.at || current.claim !== row.claim || current.at > Date.now()) continue;
       if (!this.storage.gatekeepers.get(row.id)) {
         this.storage.gatekeeperContinuations.delete(row.id);
         continue;
