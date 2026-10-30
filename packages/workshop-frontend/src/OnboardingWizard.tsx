@@ -31,7 +31,7 @@ import { useTheme } from './ThemeContext'
 import { useSiteName } from './ServerConfigContext'
 import SiteLogo from './components/SiteLogo'
 import { useDocumentTitle } from './useDocumentTitle'
-import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { AccountsSubscriberAdapter, subscribeConnectedAccounts } from './accountsSubscriber'
 import { openConnectWindow } from './connectHandoff'
 
 // ─── constants ──────────────────────────────────────────────────────────────────
@@ -179,7 +179,7 @@ export default function OnboardingWizard({
       },
     })
 
-    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
+    const subscription = subscribeConnectedAccounts(authenticatedApi, subscriber)
     subscription.catch((err) => {
       if (cancelled) return
       logRpcFailure('Failed to subscribe to connected accounts:', err)

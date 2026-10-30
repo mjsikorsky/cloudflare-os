@@ -16,7 +16,7 @@ import {
 } from '@gadgets/workshop-shared/gatekeeper'
 import { WorkshopButton } from './components/WorkshopControls'
 import Avatar from './components/Avatar'
-import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { AccountsSubscriberAdapter, subscribeConnectedAccounts } from './accountsSubscriber'
 import { openConnectWindow } from './connectHandoff'
 
 // Shown when a non-owner opens a shared Gadget that reads data through one or more gatekeeper
@@ -128,7 +128,7 @@ export default function ObserverConfigModal({
       },
     })
 
-    const subscription = authenticatedApi.subscribeConnectedAccounts(
+    const subscription = subscribeConnectedAccounts(authenticatedApi,
       subscriber, { includeForcedAutoProvisionedAccounts: true })
     subscription.catch(err => {
       if (cancelled) return

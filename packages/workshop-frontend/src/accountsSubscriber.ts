@@ -1,5 +1,6 @@
-import { RpcTarget } from 'capnweb'
-import type { ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
+import {onConnectedAccountsChanged} from './accountChanges'
+import { RpcTarget, type RpcStub } from 'capnweb'
+import type { AuthenticatedApi, ConnectedAccountsFilter, ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import type {
   AccountDescription, SupportedResource, VendorDescription,
 } from '@gadgets/workshop-shared/gatekeeper'
@@ -52,5 +53,34 @@ export class AccountsSubscriberAdapter extends RpcTarget implements ConnectedAcc
 
   ready(): void {
     this.#handlers.ready?.()
+  }
+}
+
+/** Keep an open picker current after a disowned connect popup completes. */
+export function subscribeConnectedAccounts(api: RpcStub<AuthenticatedApi>, subscriber: AccountsSubscriberAdapter, filter?: ConnectedAccountsFilter) {
+  let disposed = false
+  let refreshTimer: ReturnType<typeof setTimeout> | undefined
+  let subscription = api.subscribeConnectedAccounts(subscriber, filter)
+  const ready = Promise.resolve(subscription).then(() => {})
+  // Callers attach their normal loading/error handler synchronously below.
+  void ready.catch(() => {})
+  const stop = onConnectedAccountsChanged(() => {
+    if (disposed || refreshTimer !== undefined) return
+    refreshTimer = setTimeout(() => {
+      refreshTimer = undefined
+      if (disposed) return
+      const previous = subscription
+      subscription = api.subscribeConnectedAccounts(subscriber, filter)
+      void subscription.catch(error => { if (!disposed) console.error('Failed to refresh connected accounts:', error) })
+      previous[Symbol.dispose]()
+    }, 50)
+  })
+  return {
+    catch: (handler: (error: unknown) => unknown) => ready.catch(handler),
+    [Symbol.dispose]() {
+      if (disposed) return
+      disposed = true; stop(); if (refreshTimer !== undefined) clearTimeout(refreshTimer)
+      subscription[Symbol.dispose]()
+    },
   }
 }

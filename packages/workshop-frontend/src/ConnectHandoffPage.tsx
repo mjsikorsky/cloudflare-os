@@ -3,6 +3,7 @@ import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi, PublicApi } from '@gadgets/workshop-shared/api'
 import { useConnectionLost, useRpcStub } from './RpcContext'
 import { useAuth } from './useAuth'
+import {notifyConnectedAccountsChanged} from './accountChanges'
 import { readPopupHandoff, ticketFromHandoffFragment } from './connectHandoff'
 
 /**
@@ -91,6 +92,7 @@ export default function ConnectHandoffPage() {
     setResult(null)
     redeem().then(
       () => {
+        if (handoff.kind === 'connect') notifyConnectedAccountsChanged()
         // Browsers may refuse to close a window a script did not open; the hint covers that.
         window.close()
         setResult(done)
