@@ -214,7 +214,7 @@ export function matchesResource(search: string, resource: SupportedResource): bo
 export function normalizeResourceUrl(url: string): string {
   let normalized = url.trim()
   // Default to https:// if no protocol specified.
-  if (normalized && !/^https?:\/\//i.test(normalized)) {
+  if (normalized && !/^[a-z][a-z0-9+.-]*:/i.test(normalized)) {
     normalized = 'https://' + normalized
   }
   // Strip trailing /* wildcard — it's not meaningful for the backend.
