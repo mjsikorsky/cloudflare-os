@@ -64,6 +64,8 @@ describe('OS gadget key admission',()=>{
   const manager=await owner.getGadget(2);await manager.setAccess({visibility:'key',key:KEY});
   await expect(owner.newAgentSpawnerGatekeeper({displayName:'Shared agent',modelId:null,env:{CONTACTS:2}})).rejects.toThrow('Key-locked');
   expect(()=>impl.bindWorkpiece(1,'CONTACTS',2)).toThrow('Gadget-to-gadget');
+  impl.storage.chatContext.put({chatId:99,spawnerConfig:{displayName:'Old shared agent',modelId:null,env:{CONTACTS:2}},bindings:{CONTACTS:2}});
+  expect(()=>impl.startGatekeeperSession({type:'gadget',id:2},{from:'agent',chatId:99})).toThrow('Spawned agents');
   await manager.setAccess({visibility:'workspace'});
   impl.storage.gatekeepers.put({id:20,title:'Existing shared spawner',creationSpec:{type:'agentSpawner',config:{displayName:'Shared agent',modelId:null,env:{CONTACTS:2}}}});
   await expect(manager.setAccess({visibility:'key',key:KEY})).rejects.toThrow('Remove this gadget');

@@ -5616,6 +5616,9 @@ class OverseerImpl implements AgentHooks {
     switch (target.type) {
       case "gadget": {
         if (caller.from === "agent") {
+          if (this.getGadgetRecord(target.id).accessKeyHash && this.storage.chatContext.get(caller.chatId)?.spawnerConfig) {
+            throw new Error("Spawned agents cannot open key-locked gadgets.");
+          }
           this.#getOrCreateCapturedActions(caller.chatId).accessedGadget = true;
         }
         let chatId = "chatId" in caller ? caller.chatId : undefined;
