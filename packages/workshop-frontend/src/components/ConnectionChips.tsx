@@ -5,7 +5,7 @@ import { useState, useEffect } from 'react'
 import { logoComponents } from './ConnectionLogos'
 import { getVendorIconBackground } from './vendorColors'
 import { useTheme } from '../ThemeContext'
-import { AccountsSubscriberAdapter } from '../accountsSubscriber'
+import { AccountsSubscriberAdapter, subscribeConnectedAccounts } from '../accountsSubscriber'
 
 interface ConnectedAccount {
   id: number
@@ -38,7 +38,7 @@ export default function ConnectionChips() {
         if (!cancelled) setAccounts(Array.from(accountMap.values()))
       },
     })
-    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
+    const subscription = subscribeConnectedAccounts(authenticatedApi, subscriber)
     subscription.catch(() => {})
 
     return () => {

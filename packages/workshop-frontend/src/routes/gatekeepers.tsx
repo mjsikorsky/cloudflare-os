@@ -24,7 +24,7 @@ import {
 import { GatekeeperVendorInfo } from '@gadgets/workshop-shared/api'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { useSiteName } from '../ServerConfigContext'
-import { AccountsSubscriberAdapter } from '../accountsSubscriber'
+import { AccountsSubscriberAdapter, subscribeConnectedAccounts } from '../accountsSubscriber'
 import { openConnectWindow } from '../connectHandoff'
 
 export const Route = createFileRoute('/gatekeepers')({
@@ -538,7 +538,7 @@ function ConnectorsPage() {
       },
     })
 
-    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
+    const subscription = subscribeConnectedAccounts(authenticatedApi, subscriber)
     subscription.catch((err) => {
       if (cancelled) return
       logRpcFailure('Failed to subscribe to connected accounts:', err)

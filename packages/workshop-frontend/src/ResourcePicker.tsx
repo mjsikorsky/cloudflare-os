@@ -10,7 +10,7 @@ import { GatekeeperIcon } from './components/GatekeeperIcon'
 import {
   PICKER_CAPTION, PICKER_EMPTY, PICKER_ROW, PICKER_ROW_ACTIVE, TabHint,
 } from './components/pickerRows'
-import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { AccountsSubscriberAdapter, subscribeConnectedAccounts } from './accountsSubscriber'
 import { openConnectWindow } from './connectHandoff'
 
 export interface VendorOption {
@@ -142,7 +142,7 @@ export default function ResourcePicker({
         setAccountsLoaded(true)
       },
     })
-    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
+    const subscription = subscribeConnectedAccounts(authenticatedApi, subscriber)
     subscription.catch(error => {
       if (cancelled) return
       logRpcFailure('Failed to subscribe to connected accounts:', error)
