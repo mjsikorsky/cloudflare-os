@@ -4,17 +4,16 @@ import type {GadgetUpgradePreview,Overseer,WorkpieceId} from '@gadgets/workshop-
 import {useAuthenticatedApi} from '../../AuthContext'
 import {WorkshopButton} from '../../components/WorkshopControls'
 
-export function GadgetCodeUpgrade({overseer,gadgetId,ready,hasChat,onReviewChat,onStage}:{overseer:RpcStub<Overseer>;gadgetId:WorkpieceId;ready:boolean;hasChat:boolean;onReviewChat(id:number):void;onStage(candidate:GadgetUpgradePreview):void}){
+export function GadgetCodeUpgrade({overseer,gadgetId,ready,hasChat,onCreateReview,onStage}:{overseer:RpcStub<Overseer>;gadgetId:WorkpieceId;ready:boolean;hasChat:boolean;onCreateReview(candidate:GadgetUpgradePreview):Promise<void>;onStage(candidate:GadgetUpgradePreview):void}){
  const {authenticatedApi}=useAuthenticatedApi()
  const [choices,setChoices]=useState<Array<{id:string;title:string}>>([])
- const [open,setOpen]=useState(false),[blueprint,setBlueprint]=useState(''),[candidate,setCandidate]=useState<GadgetUpgradePreview|null>(null),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[confirmed,setConfirmed]=useState(false),[stageAfterOpen,setStageAfterOpen]=useState(false)
+ const [open,setOpen]=useState(false),[blueprint,setBlueprint]=useState(''),[candidate,setCandidate]=useState<GadgetUpgradePreview|null>(null),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[confirmed,setConfirmed]=useState(false)
  const scope=useRef(gadgetId);scope.current=gadgetId
  useEffect(()=>{if(!open)return;let active=true;void Promise.all([authenticatedApi.listLibraryBlueprints(),authenticatedApi.listOutputFormats()]).then(([library,formats])=>{if(!active)return;const options=new Map(library.map(item=>[item.id,{id:item.id,title:item.metadata.title}]));for(const format of formats)if(!options.has(format.blueprintId))options.set(format.blueprintId,{id:format.blueprintId,title:format.output.noun});setChoices([...options.values()])}).catch(()=>{if(active)setMessage('The library list is unavailable. You can still select an archive or enter a blueprint ID.')});return()=>{active=false}},[open,authenticatedApi])
- useEffect(()=>{setCandidate(null);setConfirmed(false);setStageAfterOpen(false);setMessage('')},[gadgetId])
- const stage=()=>{if(!candidate)return;try{onStage(candidate);setStageAfterOpen(false);setCandidate(null);setMessage('Code staged in this conversation. Review the Changes and choose Accept to activate it.')}catch(error){setStageAfterOpen(false);setMessage(error instanceof Error?error.message:String(error))}}
- useEffect(()=>{if(stageAfterOpen&&ready)stage()},[stageAfterOpen,ready])
+ useEffect(()=>{setCandidate(null);setConfirmed(false);setMessage('')},[gadgetId])
+ const stage=()=>{if(!candidate)return;try{onStage(candidate);setCandidate(null);setMessage('Code staged in this conversation. Review the Changes and choose Accept to activate it.')}catch(error){setMessage(error instanceof Error?error.message:String(error))}}
  async function preview(source:Parameters<Overseer['previewGadgetUpgrade']>[1]){const own=gadgetId;setBusy(true);setMessage('');setCandidate(null);setConfirmed(false);try{const value=await overseer.previewGadgetUpgrade(own,source);if(scope.current===own)setCandidate(value)}catch(error){if(scope.current===own)setMessage(error instanceof Error?error.message:String(error))}finally{if(scope.current===own)setBusy(false)}}
- async function review(){if(hasChat){stage();return}setBusy(true);try{const chat=await overseer.newChat('Review code upgrade for this gadget.',null);setStageAfterOpen(true);onReviewChat(chat)}catch(error){setMessage(error instanceof Error?error.message:String(error))}finally{setBusy(false)}}
+ async function review(){if(hasChat){stage();return}if(!candidate)return;setBusy(true);setMessage('');try{await onCreateReview(candidate);setCandidate(null);setMessage('Code staged in the new review conversation. Review the Changes and choose Accept to activate it.')}catch(error){setMessage(error instanceof Error?error.message:String(error))}finally{setBusy(false)}}
  return <div className="border-b border-kumo-line bg-kumo-base px-3 py-2 text-sm">
   <WorkshopButton tone="secondary" onClick={()=>setOpen(!open)}>Import / upgrade code</WorkshopButton>
   {open&&<div className="mt-3 space-y-3">
