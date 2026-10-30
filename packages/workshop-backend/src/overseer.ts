@@ -1,3 +1,5 @@
+import {previewGadgetCodeUpgrade} from './gadget-code-upgrade';
+import type {GadgetUpgradeSource, GadgetUpgradePreview} from '@gadgets/workshop-shared/api';
 import { gadgetAccessHash, assertGadgetAccess, guardGadgetExport } from "./gadget-access";
 import type { GadgetAccessConfiguration } from "@gadgets/workshop-shared/api";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
@@ -11120,6 +11122,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     });
   }
 
+  async previewGadgetUpgrade(id: WorkpieceId, source: GadgetUpgradeSource): Promise<GadgetUpgradePreview> {
+    const record = this.impl.getGadgetRecord(id);
+    if (record.pending || !record.commitId) throw new Error("Accept this gadget before upgrading its code.");
+    return previewGadgetCodeUpgrade(this.impl.env, id, record.commitId, source);
+  }
+
   async submitCodeChange(chatId: number, submission: CodeChangeSubmission)
       : Promise<{generation: number, revision: number}> {
     let author = await this.#getClientProfile();
@@ -12510,6 +12518,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async setPinned(_pinned: boolean): Promise<void> { this.#deny(); }
   async deleteSelf(): Promise<void> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  async previewGadgetUpgrade(_id: WorkpieceId, _source: GadgetUpgradeSource): Promise<GadgetUpgradePreview> { this.#deny(); }
   async submitCodeChange(_chatId: number, _submission: CodeChangeSubmission)
       : Promise<{generation: number, revision: number}> {
     this.#deny();

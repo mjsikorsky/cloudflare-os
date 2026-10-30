@@ -1,3 +1,4 @@
+import {GadgetConnectionsSession} from './features/gadgets/connectionsSession'
 import { useState, useEffect, useRef } from 'react'
 import { Text, Loader, Banner } from '@cloudflare/kumo'
 import { Sparkle } from '@phosphor-icons/react'
@@ -126,6 +127,7 @@ interface GadgetUIProps {
   isVisible?: boolean
   chatId?: number
   onConsoleLog?: (log: ConsoleLogEvent) => void
+  onOpenConnections?: () => void
   // Fires when the user presses Escape while the gadget iframe has focus. Sandboxed iframes
   // capture keydown events, so we forward Escape explicitly from inside the iframe.
   onIframeEscape?: () => void
@@ -140,10 +142,10 @@ const UI_BUNDLE_LOAD_TIMEOUT_MS = 20_000
 const RECONNECT_TIMEOUT_MS = 5_000
 
 export default function GadgetUI(props: GadgetUIProps) {
-  return <GadgetUISession key={`${props.chatId}:${props.deviceStateScope?.userId ?? ""}:${props.deviceStateScope?.gadgetId ?? ""}`} {...props} />
+  return <GadgetUISession key={`${props.chatId}:${props.deviceStateScope?.userId ?? ""}:${props.deviceStateScope?.workspaceId ?? ""}:${props.deviceStateScope?.gadgetId ?? ""}`} {...props} />
 }
 
-function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape, onNoUiChange }: GadgetUIProps) {
+function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape, onNoUiChange, onOpenConnections }: GadgetUIProps) {
   const [sandboxedHtml, setSandboxedHtml] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -169,6 +171,8 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
   } | null>(null)
   const rpcSessionRef = useRef<any>(null)
   // Keep latest callbacks in refs so the message-handler effect never tears down the RPC session.
+  const onOpenConnectionsRef = useRef(onOpenConnections)
+  onOpenConnectionsRef.current = onOpenConnections
   const onIframeEscapeRef = useRef(onIframeEscape)
   const onConsoleLogRef = useRef(onConsoleLog)
   onIframeEscapeRef.current = onIframeEscape
@@ -380,11 +384,17 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
           }, isCurrent)
           const fileActions = new GadgetFileActions(deviceStateScope, isCurrent)
           const accessSession = new GadgetAccessSession(() => gadgetRef.current.getAccessMode(), isCurrent)
+          const connectionsSession = new GadgetConnectionsSession(() => gadgetRef.current.getAccessMode(), isCurrent, () => {
+            if(!isCurrent() || !onOpenConnectionsRef.current)return false
+            onOpenConnectionsRef.current()
+            return true
+          })
           const forwardingTarget = new Proxy(new RpcTarget() as any, {
             get: (target, property, receiver) => {
               if (property === 'workshopDeviceState') return deviceState
               if (property === 'workshopFileActions') return fileActions
               if (property === 'workshopAccess') return accessSession
+              if (property === 'workshopConnections') return connectionsSession
               if (typeof property === 'symbol' || property in target) {
                 return Reflect.get(target, property, receiver)
               }

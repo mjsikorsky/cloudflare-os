@@ -1957,7 +1957,7 @@ export default function GadgetEditor() {
                 <GadgetUI
                   key={selectedGadgetId}
                   gadget={selectedGadgetStub}
-                  deviceStateScope={userInfo && selectedGadgetId != null ? {userId: userInfo.id, gadgetId: selectedGadgetId} : undefined}
+                  deviceStateScope={userInfo && selectedGadgetId != null ? {userId: userInfo.id, workspaceId: metadata.id, gadgetId: selectedGadgetId} : undefined}
                   height="100%"
                   reloadTrigger={uiReloadTrigger}
                   isVisible={activeTab === 'app' && !previewMode}
@@ -1965,6 +1965,7 @@ export default function GadgetEditor() {
                   onConsoleLog={handleClientConsoleLog}
                   onIframeEscape={isGadgetFullscreen ? exitGadgetFullscreen : undefined}
                   onNoUiChange={handleNoUiChange}
+                  onOpenConnections={() => { if(isGadgetFullscreen)exitGadgetFullscreen();openMobilePane('connections') }}
                 />
               ) : !previewMode && (
                 <NoGadgetPlaceholder height="100%" />
@@ -2000,6 +2001,7 @@ export default function GadgetEditor() {
                   isAgentActive={isAgentActive}
                   isVisible={activeTab === 'code'}
                   onHasCodeChange={setHasCode}
+                  onReviewChat={navigateToChat}
                 />
               ) : (
                 <NoGadgetPlaceholder height="100%" />
@@ -2054,7 +2056,7 @@ export default function GadgetEditor() {
             <GadgetUI
               key={selectedGadgetId}
               gadget={selectedGadgetStub}
-                  deviceStateScope={userInfo && selectedGadgetId != null ? {userId: userInfo.id, gadgetId: selectedGadgetId} : undefined}
+                  deviceStateScope={userInfo && selectedGadgetId != null ? {userId: userInfo.id, workspaceId: metadata.id, gadgetId: selectedGadgetId} : undefined}
               height="100%"
               reloadTrigger={uiReloadTrigger}
               isVisible={true}

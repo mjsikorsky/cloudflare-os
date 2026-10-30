@@ -1997,6 +1997,9 @@ export interface Overseer extends RpcTarget {
    */
   getGadget(id: WorkpieceId, key?: string): Promise<RpcStub<GadgetClient>>;
 
+  /** Read and validate replacement code for this existing gadget without changing code, data or bindings. Build-role only; stage the returned files through submitCodeChange and review before mergeChanges. */
+  previewGadgetUpgrade(id: WorkpieceId, source: GadgetUpgradeSource): Promise<GadgetUpgradePreview>;
+
   /**
    * Read a commit's whole tree as nested TreeNodes: the root directory's entries, each
    * directory carrying its own, in git tree order (byte order of names, a directory sorting as
@@ -2786,6 +2789,21 @@ export type ChatGadgetPinState = ChatGadgetPin & {
  * One client code-change submission (see Overseer.submitCodeChange() for the full validation and
  * retry contract).
  */
+/** A reviewed code candidate from an actual archive or the current revision of a library blueprint. */
+export type GadgetUpgradeSource =
+    { /** Decode this bounded .gadget archive without importing it into the library. */ type: "archive"; /** Original archive bytes. */ archive: ReadableStream<Uint8Array> }
+  | { /** Read the library's current published revision. */ type: "blueprint"; /** Existing blueprint bearer ID. */ blueprintId: string };
+
+/** Validated code candidate. No gadget identity, storage, access policy or bindings are replaced. */
+export type GadgetUpgradePreview = {
+  /** Human-readable candidate title. */ title: string;
+  /** Published archive/library version. */ version: number;
+  /** Exact current gadget mainline commit at preview time. */ baseCommit: string;
+  /** SHA-256 of the decoded Yjs snapshot. */ contentSha256: string;
+  /** Exact text files, as pairs so prototype-like paths survive RPC transport. */ files: [path: string, text: string][];
+  /** Binding names expected by the candidate; review separately in Connections. */ requiredBindings: string[];
+};
+
 export type CodeChangeSubmission = {
   /**
    * The generation of the chat's change stream the submission is rooted in (see

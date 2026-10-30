@@ -1,10 +1,10 @@
 import { RpcTarget } from 'capnweb'
 
 export type DeviceStateResult =
-  | { status: 'available'; value: Record<string, unknown> }
+  | { status: 'available'; value: Record<string, unknown>; scopeVersion: 2 }
   | { status: 'unavailable' | 'failed'; reason: string }
 
-export interface DeviceStateScope { userId: string; gadgetId: number }
+export interface DeviceStateScope { userId: string; workspaceId?: string; gadgetId: number }
 const MAX_BYTES = 32 * 1024
 const forbidden = new Set(['__proto__', 'prototype', 'constructor'])
 
@@ -29,19 +29,19 @@ export class GadgetDeviceState extends RpcTarget {
     super()
     this.#storage = storage
     this.#current = current
-    this.#key = scope && scope.userId && Number.isSafeInteger(scope.gadgetId) && scope.gadgetId >= 0
-      ? `gadget-device-state:v1:${encodeURIComponent(scope.userId)}:${scope.gadgetId}` : null
+    this.#key = scope && scope.userId && scope.workspaceId && Number.isSafeInteger(scope.gadgetId) && scope.gadgetId >= 0
+      ? `gadget-device-state:v2:${encodeURIComponent(scope.userId)}:${encodeURIComponent(scope.workspaceId)}:${scope.gadgetId}` : null
   }
   load(): DeviceStateResult {
     if (!this.#current()) return { status: 'unavailable', reason: 'This gadget session has ended.' }
     if (!this.#key) return { status: 'unavailable', reason: 'The authenticated device preference scope is not available.' }
     try {
       const raw = this.#storage.getItem(this.#key)
-      if (raw === null) return { status: 'available', value: {} }
+      if (raw === null) return { status: 'available', value: {}, scopeVersion: 2 }
       if (new TextEncoder().encode(raw).length > MAX_BYTES) throw Error('size')
       const value: unknown = JSON.parse(raw)
       if (!object(value) || !valid(value)) throw Error('shape')
-      return { status: 'available', value }
+      return { status: 'available', value, scopeVersion: 2 }
     } catch { return { status: 'failed', reason: 'Device preferences could not be read from this browser.' } }
   }
   save(patch: Record<string, unknown>): DeviceStateResult {
@@ -51,7 +51,7 @@ export class GadgetDeviceState extends RpcTarget {
     const value = { ...previous.value, ...patch }
     const encoded = JSON.stringify(value)
     if (new TextEncoder().encode(encoded).length > MAX_BYTES) return { status: 'failed', reason: 'Device preferences exceed the browser state limit.' }
-    try { this.#storage.setItem(this.#key!, encoded); return { status: 'available', value } }
+    try { this.#storage.setItem(this.#key!, encoded); return { status: 'available', value, scopeVersion: 2 } }
     catch { return { status: 'failed', reason: 'Device preferences could not be saved in this browser.' } }
   }
 }

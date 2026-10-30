@@ -1,11 +1,12 @@
+import {GadgetCodeUpgrade} from './GadgetCodeUpgrade'
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { DownloadSimple, GitBranch, List } from '@phosphor-icons/react'
 import type {
-  FileAtCommit, Overseer, WorkpieceId, WorkpieceSummary,
+  FileAtCommit, Overseer, WorkpieceId, WorkpieceSummary, GadgetUpgradePreview, CodeChangeSubmission,
 } from '@gadgets/workshop-shared/api'
 import {
-  MAX_FILE_TEXT_LENGTH, type CodeChange, type FileChange, type TextChange,
+  MAX_FILE_TEXT_LENGTH, validateCodeChangeSchema, validateCodeChangeContent, type CodeChange, type FileChange, type TextChange,
 } from '@gadgets/workshop-shared/code-change'
 import { RpcStub } from 'capnweb'
 import FileBrowser, { isOpenableKind, type ExpandedDirs, type FileBrowserHandle } from './FileBrowser'
@@ -96,6 +97,7 @@ interface WorkpieceCodeInterfaceProps {
   isAgentActive: boolean
   isVisible?: boolean
   onHasCodeChange?: (hasCode: boolean) => void
+  onReviewChat: (chatId: number) => void
 }
 
 const NO_PENDING_GADGETS: ReadonlySet<WorkpieceId> = new Set()
@@ -210,7 +212,7 @@ function replaceSpanTextChange(
 export default function WorkpieceCodeInterface({
   overseer, summary, height = '100%', selectedChatId = null, chatChanges,
   liveRows, liveEditPreviews, pendingGadgetIds, streamingActiveFile, isAgentActive,
-  isVisible = true, onHasCodeChange,
+  isVisible = true, onHasCodeChange, onReviewChat,
 }: WorkpieceCodeInterfaceProps) {
   const toasts = useKumoToastManager()
   const toastsRef = useRef(toasts)
@@ -222,6 +224,14 @@ export default function WorkpieceCodeInterface({
 
   // Keep refs to the current props so long-lived callbacks (the OT client delegate, editor
   // sessions) always read the latest values.
+  // Keep a failed first submission intact so retrying cannot create another review or
+  // replay a replacement with a different idempotency identity.
+  const upgradeReviewRef = useRef<{key: string; chatId: number; submission: CodeChangeSubmission} | null>(null)
+  const upgradeReviewActiveRef = useRef(true)
+  useEffect(() => {
+    upgradeReviewActiveRef.current = true
+    return () => { upgradeReviewActiveRef.current = false }
+  }, [])
   const currentOverseerRef = useRef(overseer)
   currentOverseerRef.current = overseer
   const workpieceIdRef = useRef(workpieceId)
@@ -1360,6 +1370,35 @@ export default function WorkpieceCodeInterface({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height, width: '100%' }}>
+      {summary.type === 'gadget' && summary.commitId && <GadgetCodeUpgrade overseer={overseer} gadgetId={workpieceId} ready={!isEditingLocked && !hasUnsavedChanges} hasChat={branchMode} onCreateReview={async candidate => {
+        if (baseTree === null || treeError !== null) throw new Error('Wait for the current gadget files to finish loading before creating the review.');
+        if (candidate.baseCommit !== contentBaseRef.current) throw new Error('The gadget code moved since preview. Preview the upgrade again.');
+        const requestIsCurrent = () => upgradeReviewActiveRef.current && workpieceIdRef.current === workpieceId && currentOverseerRef.current === overseer;
+        const key = `${workpieceId}:${candidate.baseCommit}:${candidate.contentSha256}`;
+        let pending = upgradeReviewRef.current;
+        if (pending?.key !== key) {
+          const incoming = new Map(candidate.files), changes: [string, FileChange][] = candidate.files.map(([path, text]) => [path, {set: text}]);
+          for (const path of stableDisplayedFiles) if (!incoming.has(path)) changes.push([path, {remove: true}]);
+          const change: CodeChange = {[workpieceId]: changes};
+          validateCodeChangeSchema(change); validateCodeChangeContent(change, new Map());
+          const chatId = await overseer.newChat('Review code upgrade for this gadget.', null);
+          pending = {key, chatId, submission: {generation: 0, revision: 0, clientId: crypto.randomUUID(), seq: 1, pins: [{gadgetId: workpieceId, baseCommit: candidate.baseCommit}], change}};
+          upgradeReviewRef.current = pending;
+        }
+        // Stage before navigation: changing chats can remount the importer or replace its
+        // local OT client, so an Effect after navigation can silently lose the candidate.
+        if (!requestIsCurrent()) throw new Error('The selected gadget changed before the review was staged. Open its review conversation before retrying.');
+        await overseer.submitCodeChange(pending.chatId, pending.submission);
+        upgradeReviewRef.current = null;
+        if (requestIsCurrent()) onReviewChat(pending.chatId);
+      }} onStage={(candidate: GadgetUpgradePreview) => {
+        if(isEditingLocked || client === null || client.hasLocalEdits())throw new Error('Wait for this conversation to finish loading and saving.');
+        if(candidate.baseCommit !== contentBaseRef.current)throw new Error('The gadget code moved since preview. Update this conversation from mainline and preview the upgrade again.');
+        const incoming=new Map(candidate.files),changes:[string,FileChange][]=candidate.files.map(([path,text])=>[path,{set:text}]);
+        for(const path of stableDisplayedFiles)if(!incoming.has(path))changes.push([path,{remove:true}]);
+        const change:CodeChange={[workpieceId]:changes};validateCodeChangeSchema(change);validateCodeChangeContent(change,new Map());
+        applyLocalFileChanges(changes);
+      }}/>}
       {hasUnsavedChanges && (
         <div className="bg-kumo-tint border-b border-kumo-line px-4 py-2 flex items-center gap-2 text-sm text-kumo-warning">
           <span className="text-base">&#9888;&#65039;</span>
