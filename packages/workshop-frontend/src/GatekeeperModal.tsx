@@ -253,8 +253,10 @@ export default function GatekeeperModal({
     ...platformConnectionTypes(siteName),
     ...vendors.flatMap(vendor => vendor.supportedResources
       .map(resource => connectionForResource(vendor, resource))),
-    ...vendors.filter(vendor=>vendor.description.autoProvisionsAccount&&vendor.supportedResources.length===0&&accounts.some(account=>account.vendorId===vendor.id&&account.description.singleton&&account.supportedResources.length===0))
-      .map(vendor=>({id:`ambient:${vendor.id}` as const,vendorId:vendor.id,groupKey:vendor.id,groupLabel:vendor.description.displayName,title:vendor.description.displayName,vendor:vendor.description.displayName,description:vendor.description.description??vendor.description.tagline??'Connect this account to the gadget.',ambientSingleton:true})),
+    // Connected accounts are the authority for singleton capabilities. Their discovery does not
+    // depend on the separate URL-resource vendor inventory completing successfully.
+    ...accounts.filter((account,index,all)=>account.vendorDescription.autoProvisionsAccount&&Boolean(account.description.singleton)&&account.supportedResources.length===0&&all.findIndex(candidate=>candidate.vendorId===account.vendorId&&candidate.vendorDescription.autoProvisionsAccount&&Boolean(candidate.description.singleton)&&candidate.supportedResources.length===0)===index)
+      .map(account=>({id:`ambient:${account.vendorId}` as const,vendorId:account.vendorId,groupKey:account.vendorId,groupLabel:account.vendorDescription.displayName,title:account.vendorDescription.displayName,vendor:account.vendorDescription.displayName,description:account.vendorDescription.description??account.vendorDescription.tagline??'Connect this account to the gadget.',ambientSingleton:true})),
   ], [siteName, vendors,accounts])
 
   const selectedConnection = useMemo(
@@ -425,7 +427,7 @@ export default function GatekeeperModal({
         setAccounts(Array.from(accountMap.values()))
       },
     })
-    const subscription = subscribeConnectedAccounts(authenticatedApi, subscriber)
+    const subscription = subscribeConnectedAccounts(authenticatedApi, subscriber, {includeForcedAutoProvisionedAccounts:true})
     subscription.catch(error => {
       if (cancelled) return
       logRpcFailure('Failed to subscribe to connected accounts:', error)
