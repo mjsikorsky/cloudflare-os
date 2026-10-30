@@ -159,6 +159,9 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
   // Bumped by the retry button to ask for a fresh load.
   const [retryNonce, setRetryNonce] = useState(0)
   const connectionGenerationRef = useRef(0)
+  // A server-facet replacement keeps the current iframe and its scoped parent
+  // capabilities alive. Do not confuse a reconnect attempt with iframe expiry.
+  const reconnectGenerationRef = useRef(0)
   const handshakePendingRef = useRef<number | null>(null)
   const gadgetRef = useRef(gadget)
   gadgetRef.current = gadget
@@ -212,6 +215,7 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
 
   const resetConnection = (reason: unknown) => {
     ++connectionGenerationRef.current
+    ++reconnectGenerationRef.current
     handshakePendingRef.current = null
     pendingGadgetStubRef.current?.reject(reason)
     pendingGadgetStubRef.current = null
@@ -234,8 +238,10 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
       return
     }
 
-    const generation = ++connectionGenerationRef.current
-    const isCurrent = () => generation === connectionGenerationRef.current
+    const generation = connectionGenerationRef.current
+    const reconnectGeneration = ++reconnectGenerationRef.current
+    const isCurrent = () => generation === connectionGenerationRef.current &&
+      reconnectGeneration === reconnectGenerationRef.current
     const pendingStub = suspendGadgetCalls()
     const replacementPromise = Promise.resolve().then(() => gadget.connectToGadget(chatId))
     void replacementPromise.then(stub => {
