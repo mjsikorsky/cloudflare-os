@@ -1,4 +1,5 @@
 import {previewGadgetCodeUpgrade} from './gadget-code-upgrade';
+import {chatHistoryBytes, CHAT_HISTORY_PAGE_BYTES, CHAT_HISTORY_ITEM_BYTES} from './chatHistoryPaging';
 import type {GadgetUpgradeSource, GadgetUpgradePreview} from '@gadgets/workshop-shared/api';
 import { gadgetAccessHash, assertGadgetAccess, guardGadgetExport } from "./gadget-access";
 import type { GadgetAccessConfiguration } from "@gadgets/workshop-shared/api";
@@ -11927,22 +11928,65 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // Compaction boundaries delimit the pages: the newest page is the tail replay still scans, and each
   // earlier page is the span one checkpoint summarized. A thread that was never compacted has a
   // single page.
-  async getChatHistory(chatId: number, beforeSequence?: number): Promise<AiChatHistoryPage> {
+  async getChatHistory(chatId: number, beforeSequence?: number,
+      transport?: {boundary?: number | null}): Promise<AiChatHistoryPage> {
     let checkpoint = beforeSequence === undefined
         ? this.impl.getActiveChatCompaction(chatId)
         : this.impl.getChatCompactionBelow(chatId, beforeSequence);
-    let result = [...this.impl.storage.chats.list({
+    if (transport?.boundary !== undefined) {
+      const boundary = transport.boundary;
+      if (boundary !== null && (!Number.isSafeInteger(boundary) || boundary < 0 ||
+          beforeSequence !== undefined && boundary > beforeSequence)) {
+        throw Error('Invalid chat history checkpoint.');
+      }
+      checkpoint = boundary === null ? undefined : this.impl.getChatCompactionBelow(chatId, boundary + 1);
+      if (boundary !== null && checkpoint?.compactedTo !== boundary) {
+        throw Error('The chat history checkpoint changed. Reload the conversation.');
+      }
+    }
+    const compacted = checkpoint && {
+      to: checkpoint.compactedTo,
+      summary: checkpoint.summary,
+      proposedChange: checkpoint.proposedChange,
+    };
+    const metadataBytes = chatHistoryBytes(compacted);
+    if (metadataBytes + 4096 > CHAT_HISTORY_ITEM_BYTES) {
+      throw Error('The chat checkpoint exceeds the bounded history transport size. Its stored history is unchanged.');
+    }
+    const messages: AiChatMessage[] = [];
+    let bytes = 4096;
+    let nextBefore: number | undefined;
+    for (const raw of this.impl.storage.chats.list({
       prefix: `${keyString(chatId)}.`,
       start: checkpoint && compactionKey(chatId, checkpoint.compactedTo),
       end: beforeSequence === undefined ? undefined : compactionKey(chatId, beforeSequence),
-    })];
+      reverse: true,
+    })) {
+      const message = this.#getChatMessageForClient(raw);
+      const size = chatHistoryBytes(message);
+      if (size + 4096 > CHAT_HISTORY_ITEM_BYTES) {
+        throw Error('One chat message exceeds the bounded history transport size. Its stored history is unchanged.');
+      }
+      if (messages.length && (bytes + size > CHAT_HISTORY_PAGE_BYTES || messages.length >= 128)) {
+        nextBefore = messages.at(-1)!.sequence;
+        break;
+      }
+      messages.push(message);
+      bytes += size;
+    }
+    // A large checkpoint can travel in its own terminal fragment. The real
+    // boundary stays fixed; no synthetic compaction or pending-change summary.
+    if (nextBefore === undefined && messages.length && bytes + metadataBytes > CHAT_HISTORY_PAGE_BYTES) {
+      nextBefore = messages.at(-1)!.sequence;
+    }
+    if (nextBefore !== undefined && transport === undefined) {
+      throw Error('This conversation requires bounded history paging. Reload the updated Workshop to open it.');
+    }
     return {
-      messages: result.map((msg) => this.#getChatMessageForClient(msg)),
-      compacted: checkpoint && {
-        to: checkpoint.compactedTo,
-        summary: checkpoint.summary,
-        proposedChange: checkpoint.proposedChange,
-      },
+      messages: messages.reverse(),
+      ...(nextBefore === undefined ? {compacted} : {
+        continuation: {beforeSequence: nextBefore, boundary: checkpoint?.compactedTo ?? null},
+      }),
     };
   }
 
@@ -12704,7 +12748,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async listChats(): Promise<AiChatMetadata[]> { this.#deny(); }
   async listModels(): Promise<AiChatAuthorInfo[]> { this.#deny(); }
-  async getChatHistory(_chatId: number, _beforeSequence?: number): Promise<AiChatHistoryPage> {
+  async getChatHistory(_chatId: number, _beforeSequence?: number,
+      _transport?: {boundary?: number | null}): Promise<AiChatHistoryPage> {
     this.#deny();
   }
   async getChatMessage(_chatId: number, _sequence: number): Promise<AiChatMessage | undefined> { this.#deny(); }
