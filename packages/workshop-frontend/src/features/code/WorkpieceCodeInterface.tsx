@@ -97,6 +97,7 @@ interface WorkpieceCodeInterfaceProps {
   isAgentActive: boolean
   isVisible?: boolean
   onHasCodeChange?: (hasCode: boolean) => void
+  onRetryConnection?: () => void
   onReviewChat: (chatId: number) => void
 }
 
@@ -212,7 +213,7 @@ function replaceSpanTextChange(
 export default function WorkpieceCodeInterface({
   overseer, summary, height = '100%', selectedChatId = null, chatChanges,
   liveRows, liveEditPreviews, pendingGadgetIds, streamingActiveFile, isAgentActive,
-  isVisible = true, onHasCodeChange, onReviewChat,
+  isVisible = true, onHasCodeChange, onReviewChat, onRetryConnection,
 }: WorkpieceCodeInterfaceProps) {
   const toasts = useKumoToastManager()
   const toastsRef = useRef(toasts)
@@ -1370,7 +1371,7 @@ export default function WorkpieceCodeInterface({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height, width: '100%' }}>
-      {summary.type === 'gadget' && summary.commitId && <GadgetCodeUpgrade overseer={overseer} gadgetId={workpieceId} ready={!isEditingLocked && !hasUnsavedChanges} hasChat={branchMode} onCreateReview={async candidate => {
+      {summary.type === 'gadget' && summary.commitId && <GadgetCodeUpgrade overseer={overseer} gadgetId={workpieceId} chatId={selectedChatId} onRetryConnection={onRetryConnection} ready={!isEditingLocked && !hasUnsavedChanges} hasChat={branchMode} onCreateReview={async candidate => {
         if (baseTree === null || treeError !== null) throw new Error('Wait for the current gadget files to finish loading before creating the review.');
         if (candidate.baseCommit !== contentBaseRef.current) throw new Error('The gadget code moved since preview. Preview the upgrade again.');
         const requestIsCurrent = () => upgradeReviewActiveRef.current && workpieceIdRef.current === workpieceId && currentOverseerRef.current === overseer;
