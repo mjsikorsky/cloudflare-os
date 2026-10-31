@@ -33,5 +33,5 @@ export async function loadChatHistoryPage(
   if (boundary !== undefined && (page.compacted?.to ?? null) !== boundary) {
     throw Error('The history checkpoint changed. Reload the conversation.');
   }
-  return {messages: fragments.reverse().flat(), ...(page.compacted ? {compacted: page.compacted} : {})};
+  return {messages: fragments.toReversed().flat(), ...(page.compacted ? {compacted: page.compacted} : {})};
 }

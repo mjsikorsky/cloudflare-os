@@ -1903,7 +1903,7 @@ class OverseerImpl implements AgentHooks {
         ]).finally(() => { settled = true; });
         // A long agent turn holds this physical alarm open. Pump retained facet
         // deadlines alongside it instead of starving them until the turn ends.
-        do {
+        for (;;) {
           await this.runGatekeeperContinuations();
           if (settled) break;
           const deadlines = [...this.storage.gatekeeperContinuations.list()].map(row => row.at);
@@ -1921,7 +1921,8 @@ class OverseerImpl implements AgentHooks {
             if (timer !== undefined) clearTimeout(timer);
             if (this.#continuationWake === wake) this.#continuationWake = undefined;
           }
-        } while (!settled);
+          if (settled) break;
+        }
         const results = await concerns;
         for (let result of results) {
           if (result.status === "rejected") throw result.reason;
@@ -5676,7 +5677,7 @@ class OverseerImpl implements AgentHooks {
 
   async runGatekeeperContinuations(): Promise<void> {
     const due = [...this.storage.gatekeeperContinuations.list()]
-      .filter(row => row.at <= Date.now()).sort((a, b) => a.at - b.at || a.id - b.id).slice(0, 4);
+      .filter(row => row.at <= Date.now()).toSorted((a, b) => a.at - b.at || a.id - b.id).slice(0, 4);
     for (const row of due) {
       // A prior facet await can let another caller cancel or postpone this wake.
       const current = this.storage.gatekeeperContinuations.get(row.id);
@@ -11983,7 +11984,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw Error('This conversation requires bounded history paging. Reload the updated Workshop to open it.');
     }
     return {
-      messages: messages.reverse(),
+      messages: messages.toReversed(),
       ...(nextBefore === undefined ? {compacted} : {
         continuation: {beforeSequence: nextBefore, boundary: checkpoint?.compactedTo ?? null},
       }),

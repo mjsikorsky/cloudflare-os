@@ -43,7 +43,7 @@ export class GadgetFileActions extends RpcTarget {
   #check(): void { if (!this.#scoped || !this.#current()) throw Error('The authenticated gadget session is not available.') }
   async #bytes(request: FileRequest): Promise<Uint8Array<ArrayBuffer>> {
     this.#check()
-    if (!request || typeof request.filename !== 'string' || !/^[^/\\\x00-\x1f]{1,180}$/.test(request.filename) || request.filename === '.' || request.filename === '..' || !mimeTypes.has(request.mediaType)) throw Error('The file name or media type is not supported.')
+    if (!request || typeof request.filename !== 'string' || (request.filename.length < 1 || request.filename.length > 180 || /[/\\]/.test(request.filename) || Array.from(request.filename).some(character => character.charCodeAt(0) < 32)) || request.filename === '.' || request.filename === '..' || !mimeTypes.has(request.mediaType)) throw Error('The file name or media type is not supported.')
     if (typeof request.base64 !== 'string' || request.base64.length > Math.ceil(MAX_BYTES / 3) * 4 || request.base64.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(request.base64)) throw Error('The file bytes are not valid bounded base64.')
     const raw = atob(request.base64), bytes = Uint8Array.from(raw, c => c.charCodeAt(0))
     if (bytes.length > MAX_BYTES || btoa(raw) !== request.base64 || !/^[a-f0-9]{64}$/.test(request.sha256)) throw Error('The file digest or size is invalid.')
