@@ -2004,6 +2004,7 @@ export default function GadgetEditor() {
                   isVisible={activeTab === 'code'}
                   onHasCodeChange={setHasCode}
                   onReviewChat={navigateToChat}
+                  onRetryConnection={retryOpen}
                 />
               ) : (
                 <NoGadgetPlaceholder height="100%" />
