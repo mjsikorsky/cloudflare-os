@@ -1,4 +1,5 @@
 import { logRpcFailure } from "./rpcErrors";
+import {loadChatHistoryPage} from './chatHistory';
 import {
   Fragment,
   isValidElement,
@@ -2876,7 +2877,7 @@ function ChatInterface({
   refreshBoundaryRef.current = (chatId: number) => {
     void (async () => {
       try {
-        cacheHistoryPage(chatId, await overseer.getChatHistory(chatId));
+        cacheHistoryPage(chatId, await loadChatHistoryPage((before, transport) => overseer.getChatHistory(chatId, before, transport)));
         forceUpdate();
       } catch (err) {
         reportIssue("chat.compaction-boundary-refresh", err, {handled: true});
@@ -3890,7 +3891,7 @@ function ChatInterface({
       setIsLoading(true);
       (async () => {
         try {
-          const page = await overseer.getChatHistory(selectedChatId);
+          const page = await loadChatHistoryPage((before, transport) => overseer.getChatHistory(selectedChatId, before, transport), undefined, () => cancelled);
           if (cancelled) return;
 
           cacheHistoryPage(selectedChatId, page);
@@ -3944,7 +3945,7 @@ function ChatInterface({
 
     setIsLoadingEarlier(true);
     try {
-      const page = await overseer.getChatHistory(selectedChatId, oldestLoadedSequence);
+      const page = await loadChatHistoryPage((before, transport) => overseer.getChatHistory(selectedChatId, before, transport), oldestLoadedSequence);
       prependAnchorRef.current = messagesContainerRef.current?.scrollHeight;
       cacheHistoryPage(selectedChatId, page);
 
