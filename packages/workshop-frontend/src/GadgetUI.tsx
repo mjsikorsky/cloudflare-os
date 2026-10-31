@@ -7,6 +7,7 @@ import { GadgetClient, ConsoleLogEvent } from '@gadgets/workshop-shared/api'
 import { GadgetDeviceState, type DeviceStateScope } from './features/gadgets/deviceState'
 import { GadgetFileActions } from './features/gadgets/fileActions'
 import { GadgetAccessSession } from './features/gadgets/accessSession'
+import { isTransientRpcError } from './rpcErrors'
 
 // We want to inject Cap'n Web into the Gadget. Luckily it has no dependencies, so we can just take
 // the whole module and embed it. We can import the module using ?raw to get a string of the
@@ -168,6 +169,8 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
   const handshakePendingRef = useRef<number | null>(null)
   const gadgetRef = useRef(gadget)
   gadgetRef.current = gadget
+  const onRetryConnectionRef = useRef(onRetryConnection)
+  onRetryConnectionRef.current = onRetryConnection
   // TODO: Remove `any` when Cap'n Web fixes cyclic type issues (RpcStub<any> triggers deep instantiation)
   const gadgetStubRef = useRef<any>(null)
   const pendingGadgetStubRef = useRef<{
@@ -210,9 +213,15 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
   }
 
   const installGadgetStub = (stub: any) => {
+    const generation = connectionGenerationRef.current
     gadgetStubRef.current = stub
-    stub.onRpcBroken?.(() => {
-      if (gadgetStubRef.current === stub) suspendGadgetCalls()
+    stub.onRpcBroken?.((caught: unknown) => {
+      if (generation !== connectionGenerationRef.current ||
+          gadgetStubRef.current !== stub || pendingGadgetStubRef.current) return
+      suspendGadgetCalls()
+      // An inner WorkerLoader facet can break while the owner's WebSocket stays
+      // healthy. Reopen the authorized owner; never replay the failed call.
+      if (isTransientRpcError(caught)) onRetryConnectionRef.current?.()
     })
   }
 

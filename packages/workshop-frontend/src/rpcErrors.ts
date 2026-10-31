@@ -32,6 +32,7 @@ const DO_RESET_MESSAGES = [
  * capnweb build so an upgrade fails loudly here instead of silently in the UX.
  */
 export const CONNECTION_MESSAGES = [
+  'Network connection lost',
   'Peer closed WebSocket',
   'WebSocket connection failed.',
   'RPC session was shut down by disposing the main stub',
