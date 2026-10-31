@@ -435,12 +435,12 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
               pending.promise,
               new Promise<never>((_, reject) => {
                 timer = setTimeout(() => {
-                  const error = new Error('Timed out reopening gadget status reads.')
+                  const recoveryError = new Error('Timed out reopening gadget status reads.')
                   if (isCurrent() && pendingGadgetStubRef.current === pending) {
                     pendingGadgetStubRef.current = null
-                    pending.reject(error)
+                    pending.reject(recoveryError)
                   }
-                  reject(error)
+                  reject(recoveryError)
                 }, READ_RECONNECT_TIMEOUT_MS)
               }),
             ]).finally(() => {
@@ -460,7 +460,7 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
             } catch (caught) {
               if (!isCurrent() || !isTransientRpcError(caught)) throw caught
               const replacement = await recoverStatusRead(stub)
-              if (!isCurrent()) throw new Error('Gadget session has ended.')
+              if (!isCurrent()) throw new Error('Gadget session has ended.', { cause: caught })
               return replacement[property](...args)
             }
           }
