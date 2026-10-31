@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { it, expect, vi } from 'vitest'
 // @ts-expect-error Node crypto is provided by the test runner, not the browser runtime.
 import { webcrypto } from 'node:crypto'
