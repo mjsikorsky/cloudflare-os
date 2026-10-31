@@ -1,4 +1,5 @@
 import {previewGadgetCodeUpgrade} from './gadget-code-upgrade';
+import {chatHistoryBytes, CHAT_HISTORY_PAGE_BYTES, CHAT_HISTORY_ITEM_BYTES} from './chatHistoryPaging';
 import type {GadgetUpgradeSource, GadgetUpgradePreview} from '@gadgets/workshop-shared/api';
 import { gadgetAccessHash, assertGadgetAccess, guardGadgetExport } from "./gadget-access";
 import type { GadgetAccessConfiguration } from "@gadgets/workshop-shared/api";
@@ -8,7 +9,7 @@ import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, Work
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, type GatekeeperContext, type GatekeeperAlarmScheduler, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -1245,6 +1246,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         }
       }),
 
+      gatekeeperContinuations: collection<{id: number; at: number; claim?: string}>()({
+        primaryKey: "id",
+      }),
+
       gatekeepers: collection<GatekeeperRecord>()({
         primaryKey: "id",
 
@@ -1644,6 +1649,7 @@ class OverseerImpl implements AgentHooks {
 
   // True while alarm() runs (see runAlarmTasks); #updateAlarm defers to its end.
   #inAlarmHandler = false;
+  #continuationWake: (() => void) | undefined;
 
   // Drains of pending agent calls currently in flight, by chat (see drainPendingAgentCalls).
   #pendingCallDrains = new Map<number, Promise<void>>();
@@ -1843,7 +1849,7 @@ class OverseerImpl implements AgentHooks {
   #updateAlarm(): void {
     if (this.#inAlarmHandler) return;
 
-    let times: number[] = [];
+    let times: number[] = [...this.storage.gatekeeperContinuations.list()].map(row => row.at);
 
     // Outstanding agent work: see #agentKeepAliveTime for why it is set once and held.
     let hasAgentWork = this.#runningAgents.size > 0 ||
@@ -1889,11 +1895,35 @@ class OverseerImpl implements AgentHooks {
     this.#inAlarmHandler = true;
     try {
       do {
-        let results = await Promise.allSettled([
+        let settled = false;
+        const concerns = Promise.allSettled([
           this.waitForAllAgentsToComplete(),
           this.drainAllPendingAgentCalls(),
           this.deliverReadyExternalMessageResponses(),
-        ]);
+        ]).finally(() => { settled = true; });
+        // A long agent turn holds this physical alarm open. Pump retained facet
+        // deadlines alongside it instead of starving them until the turn ends.
+        for (;;) {
+          await this.runGatekeeperContinuations();
+          if (settled) break;
+          const deadlines = [...this.storage.gatekeeperContinuations.list()].map(row => row.at);
+          const delay = Math.max(1000, Math.min(30000, ...deadlines.map(at => at - Date.now())));
+          let wake: (() => void) | undefined;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const next = new Promise<void>(resolve => {
+              wake = resolve;
+              this.#continuationWake = resolve;
+              timer = setTimeout(resolve, delay);
+            });
+            await Promise.race([concerns, next]);
+          } finally {
+            if (timer !== undefined) clearTimeout(timer);
+            if (this.#continuationWake === wake) this.#continuationWake = undefined;
+          }
+          if (settled) break;
+        }
+        const results = await concerns;
         for (let result of results) {
           if (result.status === "rejected") throw result.reason;
         }
@@ -5417,7 +5447,8 @@ class OverseerImpl implements AgentHooks {
     // happen long after the session that queued it, so the queue-time stub is gone) -- the
     // binding that makes buildPack() serve exactly this action's pending-push closure.
     await gatekeeper.applyAction(record.action,
-        new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id));
+        new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id),
+        this.gatekeeperContext(record.gatekeeperId));
     record.state = "approved";
     record.appliedAt = new Date();
     record.resolvedBy = resolvedBy;
@@ -5611,6 +5642,68 @@ class OverseerImpl implements AgentHooks {
 
     this.ctx.facets.delete(`gatekeeper${id}`);
     this.storage.gatekeepers.delete(id);
+    this.storage.gatekeeperContinuations.delete(id);
+    this.#updateAlarm();
+  }
+
+  gatekeeperContext(id: number): GatekeeperContext {
+    if (!this.storage.gatekeepers.get(id)) throw new Error("No such gatekeeper.");
+    return {alarms: this.ctx.exports.GatekeeperAlarmLoopback({props: {
+      overseerId: this.ctx.id.toString(), gatekeeperId: id,
+    }})};
+  }
+
+  gatekeeperAlarm(id: number): number | null {
+    this.assertGatekeeperUsable(id);
+    if (!this.storage.gatekeepers.get(id)) throw new Error("No such gatekeeper.");
+    const deadline = this.storage.gatekeeperContinuations.get(id);
+    // The recovery claim is not a requested continuation: callers must explicitly
+    // re-arm their next deadline before a successful delivery clears the claim.
+    return deadline && !deadline.claim ? deadline.at : null;
+  }
+
+  setGatekeeperAlarm(id: number, timestamp: number | null): void {
+    this.gatekeeperAlarm(id);
+    if (timestamp === null) this.storage.gatekeeperContinuations.delete(id);
+    else {
+      if (!Number.isSafeInteger(timestamp) || timestamp < 0 || timestamp > Date.now() + 366 * 86400000) {
+        throw new TypeError("Invalid gatekeeper continuation deadline.");
+      }
+      this.storage.gatekeeperContinuations.put({id, at: Math.max(Date.now() + 1000, timestamp)});
+    }
+    this.#continuationWake?.();
+    this.#updateAlarm();
+  }
+
+  async runGatekeeperContinuations(): Promise<void> {
+    const due = [...this.storage.gatekeeperContinuations.list()]
+      .filter(row => row.at <= Date.now()).toSorted((a, b) => a.at - b.at || a.id - b.id).slice(0, 4);
+    for (const row of due) {
+      // A prior facet await can let another caller cancel or postpone this wake.
+      const current = this.storage.gatekeeperContinuations.get(row.id);
+      if (!current || current.at !== row.at || current.claim !== row.claim || current.at > Date.now()) continue;
+      if (!this.storage.gatekeepers.get(row.id)) {
+        this.storage.gatekeeperContinuations.delete(row.id);
+        continue;
+      }
+      // Replace the consumed deadline with recovery before crossing a facet await.
+      // A root eviction must not strand previously approved durable work.
+      const claim = crypto.randomUUID();
+      this.storage.gatekeeperContinuations.put({id: row.id, at: Date.now() + 300000, claim});
+      try {
+        this.assertGatekeeperUsable(row.id);
+        const facet = this.getGatekeeperFacet(row.id) as
+          Fetcher<Gatekeeper<any> & Required<Pick<Gatekeeper<any>, "continueProcessing">>>;
+        await facet.continueProcessing(this.gatekeeperContext(row.id));
+        if (this.storage.gatekeeperContinuations.get(row.id)?.claim === claim) {
+          this.storage.gatekeeperContinuations.delete(row.id);
+        }
+      } catch {
+        if (this.storage.gatekeepers.get(row.id) && !this.storage.gatekeeperContinuations.get(row.id)) {
+          this.storage.gatekeeperContinuations.put({id: row.id, at: Date.now() + 300000});
+        }
+      }
+    }
   }
 
   // Open the session behind a binding loopback.
@@ -6453,7 +6546,7 @@ class OverseerImpl implements AgentHooks {
       : Promise<RpcStub<Session>> {
     this.assertGatekeeperUsable(id);
     // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
-    return facet.startSession(new ApprovalQueueImpl(this, id, caller));
+    return facet.startSession(new ApprovalQueueImpl(this, id, caller), this.gatekeeperContext(id));
   }
 
   // Sessions are authorized and verified only at open(), so widening what a live session's holder
@@ -9926,6 +10019,14 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     await this.impl.runAlarmTasks();
   }
 
+  /** Read the deadline sealed into a gatekeeper's kernel alarm capability. */
+  getGatekeeperContinuationAlarm(id: number): number | null { return this.impl.gatekeeperAlarm(id); }
+
+  /** Update only the deadline sealed into a gatekeeper's kernel alarm capability. */
+  setGatekeeperContinuationAlarm(id: number, timestamp: number | null): void {
+    this.impl.setGatekeeperAlarm(id, timestamp);
+  }
+
   // Initialize a brand-new workspace's storage. (Before git-backed code storage this also wrote
   // an empty Yjs snapshot as legacy code version 1; workspaces born since have no legacy code
   // log at all -- committed code exists only once a first commit lands in the git store.)
@@ -10581,6 +10682,25 @@ export class GatekeeperLoopback extends WorkerEntrypoint<Cloudflare.Env, Gatekee
   dummyMethodToWorkAroundValidatorBug() {}
 }
 
+/** Persistent, single-facet alarm capability; it cannot dispatch arbitrary methods. */
+export class GatekeeperAlarmLoopback
+    extends WorkerEntrypoint<Cloudflare.Env, {overseerId: string; gatekeeperId: number}>
+    implements GatekeeperAlarmScheduler {
+  #overseer() {
+    const ns = this.ctx.exports.OverseerDurableObject;
+    return ns.get(ns.idFromString(this.ctx.props.overseerId));
+  }
+  getAlarm(): Promise<number | null> {
+    return this.#overseer().getGatekeeperContinuationAlarm(this.ctx.props.gatekeeperId);
+  }
+  setAlarm(timestamp: number): Promise<void> {
+    return this.#overseer().setGatekeeperContinuationAlarm(this.ctx.props.gatekeeperId, timestamp);
+  }
+  deleteAlarm(): Promise<void> {
+    return this.#overseer().setGatekeeperContinuationAlarm(this.ctx.props.gatekeeperId, null);
+  }
+}
+
 type GatekeeperHookLoopbackProps = {
   overseerId: string;
   hookId: number;
@@ -11189,8 +11309,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     });
   }
 
-  async newGatekeeper(accountId: number, resourceUrl: string)
+  async newGatekeeper(accountId: number, resourceUrl?: string)
       : Promise<GatekeeperClient<any> | null> {
+    if(resourceUrl===undefined){
+      if(this.clientUserId!==this.impl.ownerId)throw Error('Only the workspace owner can add an ambient account connection.');
+      const {class:cls,vendorId}=await this.#clientUser.getAmbientSingletonGatekeeperClass(accountId);
+      const existing=[...this.impl.storage.gatekeepers.list()].find(record=>record.creationSpec?.type==='ambient'&&record.creationSpec.accountId===accountId&&record.creationSpec.vendorId===vendorId);
+      if(existing)return this.getGatekeeperById(existing.id);
+      return this.impl.addGatekeeper(cls,{type:'ambient',vendorId,accountId},this.clientUserId,this.#mintedCapabilityKind());
+    }
     let {class: cls, vendorId, typeUrlPattern} =
         await this.#clientUser.getGatekeeperClassFor(accountId, resourceUrl);
     let creationSpec: GatekeeperCreationSpec = {
@@ -11802,22 +11929,65 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // Compaction boundaries delimit the pages: the newest page is the tail replay still scans, and each
   // earlier page is the span one checkpoint summarized. A thread that was never compacted has a
   // single page.
-  async getChatHistory(chatId: number, beforeSequence?: number): Promise<AiChatHistoryPage> {
+  async getChatHistory(chatId: number, beforeSequence?: number,
+      transport?: {boundary?: number | null}): Promise<AiChatHistoryPage> {
     let checkpoint = beforeSequence === undefined
         ? this.impl.getActiveChatCompaction(chatId)
         : this.impl.getChatCompactionBelow(chatId, beforeSequence);
-    let result = [...this.impl.storage.chats.list({
+    if (transport?.boundary !== undefined) {
+      const boundary = transport.boundary;
+      if (boundary !== null && (!Number.isSafeInteger(boundary) || boundary < 0 ||
+          beforeSequence !== undefined && boundary > beforeSequence)) {
+        throw Error('Invalid chat history checkpoint.');
+      }
+      checkpoint = boundary === null ? undefined : this.impl.getChatCompactionBelow(chatId, boundary + 1);
+      if (boundary !== null && checkpoint?.compactedTo !== boundary) {
+        throw Error('The chat history checkpoint changed. Reload the conversation.');
+      }
+    }
+    const compacted = checkpoint && {
+      to: checkpoint.compactedTo,
+      summary: checkpoint.summary,
+      proposedChange: checkpoint.proposedChange,
+    };
+    const metadataBytes = chatHistoryBytes(compacted);
+    if (metadataBytes + 4096 > CHAT_HISTORY_ITEM_BYTES) {
+      throw Error('The chat checkpoint exceeds the bounded history transport size. Its stored history is unchanged.');
+    }
+    const messages: AiChatMessage[] = [];
+    let bytes = 4096;
+    let nextBefore: number | undefined;
+    for (const raw of this.impl.storage.chats.list({
       prefix: `${keyString(chatId)}.`,
       start: checkpoint && compactionKey(chatId, checkpoint.compactedTo),
       end: beforeSequence === undefined ? undefined : compactionKey(chatId, beforeSequence),
-    })];
+      reverse: true,
+    })) {
+      const message = this.#getChatMessageForClient(raw);
+      const size = chatHistoryBytes(message);
+      if (size + 4096 > CHAT_HISTORY_ITEM_BYTES) {
+        throw Error('One chat message exceeds the bounded history transport size. Its stored history is unchanged.');
+      }
+      if (messages.length && (bytes + size > CHAT_HISTORY_PAGE_BYTES || messages.length >= 128)) {
+        nextBefore = messages.at(-1)!.sequence;
+        break;
+      }
+      messages.push(message);
+      bytes += size;
+    }
+    // A large checkpoint can travel in its own terminal fragment. The real
+    // boundary stays fixed; no synthetic compaction or pending-change summary.
+    if (nextBefore === undefined && messages.length && bytes + metadataBytes > CHAT_HISTORY_PAGE_BYTES) {
+      nextBefore = messages.at(-1)!.sequence;
+    }
+    if (nextBefore !== undefined && transport === undefined) {
+      throw Error('This conversation requires bounded history paging. Reload the updated Workshop to open it.');
+    }
     return {
-      messages: result.map((msg) => this.#getChatMessageForClient(msg)),
-      compacted: checkpoint && {
-        to: checkpoint.compactedTo,
-        summary: checkpoint.summary,
-        proposedChange: checkpoint.proposedChange,
-      },
+      messages: messages.toReversed(),
+      ...(nextBefore === undefined ? {compacted} : {
+        continuation: {beforeSequence: nextBefore, boundary: checkpoint?.compactedTo ?? null},
+      }),
     };
   }
 
@@ -12537,7 +12707,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async listPreApprovableActions(): Promise<PreApprovableAction[]> { this.#deny(); }
   async getGatekeeperById(_id: number): Promise<GatekeeperClient<any>> { this.#deny(); }
-  async newGatekeeper(_accountId: number, _resourceUrl: string)
+  async newGatekeeper(_accountId: number, _resourceUrl?: string)
       : Promise<GatekeeperClient<any> | null> { this.#deny(); }
   async newAiModelGatekeeper(_modelId: string): Promise<GatekeeperClient<any>> { this.#deny(); }
   async newAgentSpawnerGatekeeper(_config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
@@ -12579,7 +12749,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async listChats(): Promise<AiChatMetadata[]> { this.#deny(); }
   async listModels(): Promise<AiChatAuthorInfo[]> { this.#deny(); }
-  async getChatHistory(_chatId: number, _beforeSequence?: number): Promise<AiChatHistoryPage> {
+  async getChatHistory(_chatId: number, _beforeSequence?: number,
+      _transport?: {boundary?: number | null}): Promise<AiChatHistoryPage> {
     this.#deny();
   }
   async getChatMessage(_chatId: number, _sequence: number): Promise<AiChatMessage | undefined> { this.#deny(); }

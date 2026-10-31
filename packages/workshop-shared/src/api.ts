@@ -2110,7 +2110,7 @@ export interface Overseer extends RpcTarget {
    * The new gatekeeper is a workspace-level workpiece; it is not bound into any gadget's `env` by
    * default. Use GadgetClient.bind() / bindWithSuggestedName() to expose it to a gadget.
    */
-  newGatekeeper(accountId: number, resourceUrl: string): Promise<GatekeeperClient<any> | null>;
+  newGatekeeper(accountId: number, resourceUrl?: string): Promise<GatekeeperClient<any> | null>;
 
   /**
    * Create a new gatekeeper for an AI model binding. The model can be any returned by
@@ -2253,7 +2253,8 @@ export interface Overseer extends RpcTarget {
    * In typical usage, the client subscribes to all chat activity upfront, but only fetches
    * histories if and when the user opens a specific.
    */
-  getChatHistory(chatId: number, beforeSequence?: number): Promise<AiChatHistoryPage>;
+  getChatHistory(chatId: number, beforeSequence?: number,
+      transport?: {boundary?: number | null}): Promise<AiChatHistoryPage>;
 
   /** Fetch a single message from a chat thread. */
   getChatMessage(chatId: number, sequence: number): Promise<AiChatMessage | undefined>;
@@ -2873,6 +2874,10 @@ export type MergeChangesResult = {
 export type AiChatHistoryPage = {
   /** The page's messages, ascending by sequence. */
   messages: AiChatMessage[];
+
+  /** Transport continuation within this same logical checkpoint page. Assemble
+   * all fragments before computing pending changes. This is not compaction. */
+  continuation?: {beforeSequence: number; boundary: number | null};
 
   /** The checkpoint bounding this page below, absent once the page reaches the thread's start. */
   compacted?: {

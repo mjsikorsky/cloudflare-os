@@ -38,6 +38,6 @@ export async function previewGadgetCodeUpgrade(env:Pick<Cloudflare.Env,'BLUEPRIN
   const change:CodeChange={[id]:files.map(([path,text])=>[path,{set:text}])};
   validateCodeChangeSchema(change);validateCodeChangeContent(change,new Map());
   const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',snapshot));
-  return{title,version,baseCommit,contentSha256:Array.from(digest,byte=>byte.toString(16).padStart(2,'0')).join(''),files,requiredBindings:Object.keys(bindings).sort()};
+  return{title,version,baseCommit,contentSha256:Array.from(digest,byte=>byte.toString(16).padStart(2,'0')).join(''),files,requiredBindings:Object.keys(bindings).toSorted()};
  }finally{doc.destroy();}
 }
