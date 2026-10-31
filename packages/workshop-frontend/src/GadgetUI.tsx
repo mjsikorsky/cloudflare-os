@@ -160,6 +160,7 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
   const loadGenerationRef = useRef(0)
   // Bumped by the retry button to ask for a fresh load.
   const [retryNonce, setRetryNonce] = useState(0)
+  const retryConnectionFromRef = useRef<RpcStub<GadgetClient> | null>(null)
   const connectionGenerationRef = useRef(0)
   // A server-facet replacement keeps the current iframe and its scoped parent
   // capabilities alive. Do not confuse a reconnect attempt with iframe expiry.
@@ -293,11 +294,20 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
 
   // Effect to load UI bundle when component becomes visible for the first time or when invalidated
   useEffect(() => {
+    const retryFrom = retryConnectionFromRef.current
+    // A loaded bundle can still fail its server handshake. A fresh owner connection must
+    // reload that view too, but a manual retry must never issue another call on the old stub.
+    if (retryFrom === gadget) return
+    const retryConnection = retryFrom !== null
     // Only load if:
     // 1. Component is visible AND
     // 2. Either never loaded before OR invalidated due to code changes
-    if (!isVisible || (hasLoaded && !isInvalidated)) {
+    if (!isVisible || (!retryConnection && hasLoaded && !isInvalidated)) {
       return
+    }
+    if (retryConnection) {
+      retryConnectionFromRef.current = null
+      resetConnection(new Error('Gadget UI connection was retried.'))
     }
 
     // Superseded loads are ignored by generation rather than by a per-run `cancelled` flag: a run
@@ -488,6 +498,7 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
                   // Retrying the same failed capability cannot recover an object reset.
                   // Wait for the owner to supply its freshly authorized replacement.
                   ++loadGenerationRef.current
+                  retryConnectionFromRef.current = gadget
                   onRetryConnection()
                   return
                 }
