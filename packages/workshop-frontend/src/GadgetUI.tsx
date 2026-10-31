@@ -128,6 +128,8 @@ interface GadgetUIProps {
   chatId?: number
   onConsoleLog?: (log: ConsoleLogEvent) => void
   onOpenConnections?: () => void
+  // Reopen through the authenticated workspace owner when a retained client has expired.
+  onRetryConnection?: () => void
   // Fires when the user presses Escape while the gadget iframe has focus. Sandboxed iframes
   // capture keydown events, so we forward Escape explicitly from inside the iframe.
   onIframeEscape?: () => void
@@ -145,7 +147,7 @@ export default function GadgetUI(props: GadgetUIProps) {
   return <GadgetUISession key={`${props.chatId}:${props.deviceStateScope?.userId ?? ""}:${props.deviceStateScope?.workspaceId ?? ""}:${props.deviceStateScope?.gadgetId ?? ""}`} {...props} />
 }
 
-function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape, onNoUiChange, onOpenConnections }: GadgetUIProps) {
+function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape, onNoUiChange, onOpenConnections, onRetryConnection }: GadgetUIProps) {
   const [sandboxedHtml, setSandboxedHtml] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -482,6 +484,13 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
           action={
             <Banner.Action
               onClick={() => {
+                if (onRetryConnection) {
+                  // Retrying the same failed capability cannot recover an object reset.
+                  // Wait for the owner to supply its freshly authorized replacement.
+                  ++loadGenerationRef.current
+                  onRetryConnection()
+                  return
+                }
                 setError(null)
                 setHasLoaded(false)
                 setIsInvalidated(false)
