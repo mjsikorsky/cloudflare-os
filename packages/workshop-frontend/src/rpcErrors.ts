@@ -32,7 +32,6 @@ const DO_RESET_MESSAGES = [
  * capnweb build so an upgrade fails loudly here instead of silently in the UX.
  */
 export const CONNECTION_MESSAGES = [
-  'Network connection lost',
   'Peer closed WebSocket',
   'WebSocket connection failed.',
   'RPC session was shut down by disposing the main stub',
@@ -40,6 +39,9 @@ export const CONNECTION_MESSAGES = [
   // disposes while an outage is being recovered.
   'Attempted to use RPC stub after it has been disposed',
 ]
+
+// Native Worker RPC can lose its connection while the Cap'n Web socket remains healthy.
+const WORKER_CONNECTION_MESSAGES = ['Network connection lost']
 
 // Fallback for auth errors thrown without a code (older deployments); codes are authoritative.
 const AUTH_MESSAGES = Object.values(AUTH_ERROR_MESSAGES)
@@ -68,7 +70,7 @@ export function classifyRpcError(err: unknown): RpcErrorClass {
   // observe it. It classifies with do-reset, whose callers own that recovery.
   if (isDurableObjectResetError(err) || flag(err, 'retryable')) return 'do-reset'
   const message = messageOf(err)
-  if (CONNECTION_MESSAGES.some(m => message.includes(m))) {
+  if ([...CONNECTION_MESSAGES, ...WORKER_CONNECTION_MESSAGES].some(m => message.includes(m))) {
     return 'connection'
   }
   // 'auth' is deliberately terminal — never quieted, never retried, and there is no missing
