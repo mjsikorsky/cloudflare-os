@@ -415,7 +415,9 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
             setItem: (key, value) => window.localStorage.setItem(key, value),
           }, isCurrent)
           const fileActions = new GadgetFileActions(deviceStateScope, isCurrent)
-          const accessSession = new GadgetAccessSession(() => gadgetRef.current.getAccessMode(), isCurrent)
+          const accessSession = new GadgetAccessSession(() => gadgetRef.current.getAccessMode(), isCurrent, () => {
+            if (isCurrent()) onRetryConnectionRef.current?.()
+          })
           const connectionsSession = new GadgetConnectionsSession(() => gadgetRef.current.getAccessMode(), isCurrent, () => {
             if(!isCurrent() || !onOpenConnectionsRef.current)return false
             onOpenConnectionsRef.current()
