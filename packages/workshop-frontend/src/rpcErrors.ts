@@ -41,7 +41,10 @@ export const CONNECTION_MESSAGES = [
 ]
 
 // Native Worker RPC can lose its connection while the Cap'n Web socket remains healthy.
-const WORKER_CONNECTION_MESSAGES = ['Network connection lost']
+const WORKER_CONNECTION_MESSAGES = [
+  'Network connection lost',
+  'Connection closed: this Durable Object instance is no longer active. Reconnect or retry the request.',
+]
 
 // Fallback for auth errors thrown without a code (older deployments); codes are authoritative.
 const AUTH_MESSAGES = Object.values(AUTH_ERROR_MESSAGES)

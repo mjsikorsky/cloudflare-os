@@ -171,6 +171,7 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
   // capabilities alive. Do not confuse a reconnect attempt with iframe expiry.
   const reconnectGenerationRef = useRef(0)
   const handshakePendingRef = useRef<number | null>(null)
+  const handshakeRecoveryAttemptsRef = useRef(0)
   const gadgetRef = useRef(gadget)
   gadgetRef.current = gadget
   const onRetryConnectionRef = useRef(onRetryConnection)
@@ -486,12 +487,22 @@ function GadgetUISession({ gadget, deviceStateScope, height, reloadTrigger, isVi
             },
           })
           rpcSessionRef.current = newMessagePortRpcSession(port, forwardingTarget)
+          handshakeRecoveryAttemptsRef.current = 0
         } catch (caught) {
           gadgetStub?.[Symbol.dispose]?.()
           port.close()
           if (!isCurrent()) return
           console.error('Failed to establish RPC connection:', caught)
           setError('Failed to connect gadget to server')
+          // Reacquire only the authorized owner on a known transport failure.
+          // A fresh owner reloads the failed handshake through retryConnectionFromRef;
+          // it does not replay any gadget action or reuse the closed capability.
+          if (isTransientRpcError(caught) && onRetryConnectionRef.current &&
+              handshakeRecoveryAttemptsRef.current < 2) {
+            ++handshakeRecoveryAttemptsRef.current
+            retryConnectionFromRef.current = gadgetRef.current
+            onRetryConnectionRef.current()
+          }
         } finally {
           if (handshakePendingRef.current === generation) handshakePendingRef.current = null
         }
