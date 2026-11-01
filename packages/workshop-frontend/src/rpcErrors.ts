@@ -21,6 +21,7 @@ const WORKERD_DEAD_CAPABILITY_MESSAGE =
 const DO_RESET_MESSAGES = [
   'Durable Object reset because its code was updated',
   'Durable Object storage operation exceeded timeout',
+  'Internal error in Durable Object storage caused object to be reset',
   "Durable Object's isolate exceeded its memory limit",
   'Durable Object exceeded its CPU time limit',
   WORKERD_DEAD_CAPABILITY_MESSAGE,
