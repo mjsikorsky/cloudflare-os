@@ -2790,10 +2790,16 @@ export type ChatGadgetPinState = ChatGadgetPin & {
  * One client code-change submission (see Overseer.submitCodeChange() for the full validation and
  * retry contract).
  */
+/** One editor-selected archive, exposed as a bounded streaming source. */
+export interface GadgetArchiveUpload extends RpcTarget {
+  /** Return the original archive stream once; a second read must be refused. */
+  read(): ReadableStream<Uint8Array>;
+}
+
 /** A reviewed code candidate from an actual archive or the current revision of a library blueprint. */
 export type GadgetUpgradeSource =
     { /** Decode this bounded .gadget archive without importing it into the library. */ type: "archive"; /** Original archive bytes. */ archive: ReadableStream<Uint8Array> }
-  | { /** Read an editor-selected archive through a streaming RPC callback. */ type: "archive-upload"; /** One-shot callback returning the original archive stream. */ archive: RpcStub<() => ReadableStream<Uint8Array>> }
+  | { /** Read an editor-selected archive through a streaming RPC target. */ type: "archive-upload"; /** One-shot target returning the original archive stream. */ archive: RpcStub<GadgetArchiveUpload> }
   | { /** Read the library's current published revision. */ type: "blueprint"; /** Existing blueprint bearer ID. */ blueprintId: string };
 
 /** Validated code candidate. No gadget identity, storage, access policy or bindings are replaced. */

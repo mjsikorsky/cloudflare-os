@@ -1,6 +1,6 @@
 import {useEffect,useRef,useState} from 'react'
-import {RpcStub} from 'capnweb'
-import type {GadgetUpgradePreview,Overseer,WorkpieceId} from '@gadgets/workshop-shared/api'
+import {RpcStub,RpcTarget} from 'capnweb'
+import type {GadgetArchiveUpload,GadgetUpgradePreview,Overseer,WorkpieceId} from '@gadgets/workshop-shared/api'
 import {useAuthenticatedApi} from '../../AuthContext'
 import {WorkshopButton} from '../../components/WorkshopControls'
 
@@ -51,10 +51,12 @@ export function GadgetCodeUpgrade({overseer,gadgetId,chatId,ready,hasChat,onCrea
   finally{if(isCurrent(own,request))setBusy(null)}
  }
  async function previewArchive(file:File){
-  let opened=false;
-  const archive=new RpcStub(()=>{
-   if(opened)throw new Error('This archive upload has already been read. Select the archive again.');
-   opened=true;return file.stream();
+  const archive=new RpcStub<GadgetArchiveUpload>(new class extends RpcTarget implements GadgetArchiveUpload{
+   #opened=false;
+   read():ReadableStream<Uint8Array>{
+    if(this.#opened)throw new Error('This archive upload has already been read. Select the archive again.');
+    this.#opened=true;return file.stream();
+   }
   });
   try{await preview({type:'archive-upload',archive})}finally{archive[Symbol.dispose]()}
  }
