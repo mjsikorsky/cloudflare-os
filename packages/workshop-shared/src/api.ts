@@ -2793,6 +2793,7 @@ export type ChatGadgetPinState = ChatGadgetPin & {
 /** A reviewed code candidate from an actual archive or the current revision of a library blueprint. */
 export type GadgetUpgradeSource =
     { /** Decode this bounded .gadget archive without importing it into the library. */ type: "archive"; /** Original archive bytes. */ archive: ReadableStream<Uint8Array> }
+  | { /** Read an editor-selected archive through a streaming RPC callback. */ type: "archive-upload"; /** One-shot callback returning the original archive stream. */ archive: RpcStub<() => ReadableStream<Uint8Array>> }
   | { /** Read the library's current published revision. */ type: "blueprint"; /** Existing blueprint bearer ID. */ blueprintId: string };
 
 /** Validated code candidate. No gadget identity, storage, access policy or bindings are replaced. */
