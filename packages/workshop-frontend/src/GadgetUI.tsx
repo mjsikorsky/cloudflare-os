@@ -145,7 +145,8 @@ const UI_BUNDLE_LOAD_TIMEOUT_MS = 20_000
 const RECONNECT_TIMEOUT_MS = 5_000
 const READ_RECONNECT_TIMEOUT_MS = 10_000
 // Only metadata reads: financial updates, submissions and approvals must never be replayed.
-const RECOVERABLE_STATUS_READS = new Set(['documentCatalog', 'documentIntakeStatus', 'documentRefreshStatus', 'feedCursors'])
+// UI chunks are immutable, digest-checked code reads; retrying them cannot replay a CRM write.
+const RECOVERABLE_STATUS_READS = new Set(['documentCatalog', 'documentIntakeStatus', 'documentRefreshStatus', 'feedCursors', 'uiAssetChunk'])
 
 export default function GadgetUI(props: GadgetUIProps) {
   return <GadgetUISession key={`${props.chatId}:${props.deviceStateScope?.userId ?? ""}:${props.deviceStateScope?.workspaceId ?? ""}:${props.deviceStateScope?.gadgetId ?? ""}`} {...props} />
